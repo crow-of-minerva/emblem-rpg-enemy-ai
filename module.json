@@ -1,0 +1,35 @@
+{
+  "id": "emblem-rpg-enemy-ai",
+  "title": "Emblem RPG Enemy AI",
+  "description": "Automated enemy decision-making for Emblem RPG.",
+  "version": "1.0.0",
+  "manifest": "https://github.com/crow-of-minerva/emblem-rpg-enemy-ai/releases/latest/download/module.json",
+  "download": "https://github.com/crow-of-minerva/emblem-rpg-enemy-ai/releases/download/v1.0.0/emblem-rpg-enemy-ai.zip",
+  "compatibility": {
+    "minimum": "14",
+    "verified": "14"
+  },
+  "esmodules": [
+    "emblem-rpg-enemy-ai.mjs"
+  ],
+  "styles": [
+    "styles/enemy-ai.css"
+  ],
+  "authors": [
+    {
+      "name": "Anathena"
+    }
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "emblem-rpg",
+        "type": "system",
+        "compatibility": {
+          "minimum": "1.0.0"
+        },
+        "manifest": "https://github.com/crow-of-minerva/emblem-rpg/releases/latest/download/system.json"
+      }
+    ]
+  }
+}

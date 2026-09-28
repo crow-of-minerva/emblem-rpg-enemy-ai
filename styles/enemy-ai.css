@@ -1,0 +1,230 @@
+/* -------------------------------------------- */
+/*  Combat tracker: the Enemy AI switch         */
+/* -------------------------------------------- */
+
+/* While armed, two streams orbit the border clockwise: white for On, gold for Locked. The ring is a conic
+   gradient masked down to the border box; animating it needs the angle registered as a real <angle>. */
+@property --ect-ai-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+/* The switch is one of the rebuild's own .ect-btn-toggle .ect-btn-wide buttons, so its metrics, casing and quiet
+   colour all come from play-surfaces.css. Only the armed colours and the orbit belong to this module. */
+.ect-toggles .ect-btn-ai.is-on,
+.ect-toggles .ect-btn-ai.is-locked {
+  position: relative;
+}
+.ect-toggles .ect-btn-ai.is-on {
+  --ect-ai-stream: rgba(255, 255, 255, 0.95);
+  color: #ffffff;
+}
+.ect-toggles .ect-btn-ai.is-locked {
+  --ect-ai-stream: rgba(255, 208, 122, 0.95);
+  color: #ffd07a;
+}
+.ect-toggles .ect-btn-ai.is-on:hover:not([disabled]),
+.ect-toggles .ect-btn-ai.is-locked:hover:not([disabled]) {
+  background: rgba(255, 255, 255, 0.08);
+}
+.ect-toggles .ect-btn-ai.is-on::before,
+.ect-toggles .ect-btn-ai.is-locked::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  padding: 2px;
+  border-radius: 4px;
+  background: repeating-conic-gradient(
+    from var(--ect-ai-angle),
+    rgba(255, 255, 255, 0) 0deg,
+    rgba(255, 255, 255, 0) 148deg,
+    var(--ect-ai-stream) 178deg,
+    rgba(255, 255, 255, 0) 180deg
+  );
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: ect-ai-orbit 2.5s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes ect-ai-orbit {
+  to { --ect-ai-angle: 360deg; }
+}
+
+/* -------------------------------------------- */
+/*  Combat tracker: the behaviour badge         */
+/* -------------------------------------------- */
+
+.ect-unit-icon.ect-behavior-pursue {
+  color: #ff6b6b;
+  filter: drop-shadow(0 0 3px rgba(255, 107, 107, 0.65));
+}
+.ect-unit-icon.ect-behavior-freeRoam {
+  color: #ffd24a;
+  filter: drop-shadow(0 0 3px rgba(255, 210, 74, 0.6));
+}
+
+/* -------------------------------------------- */
+/*  Combat AI tray                              */
+/* -------------------------------------------- */
+
+/* Every other rule the tray needs already ships in the rebuild's tools.css. The gate note is the one addition:
+   it stays in the DOM so the Faction tab's Actor Type select can show and hide it live. */
+.acp-ai-pane .acp-empty-note[hidden] {
+  display: none;
+}
+
+/* -------------------------------------------- */
+/*  AI Parameters editor                        */
+/* -------------------------------------------- */
+
+.dialog-ai-parameters .aip-container {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-ai-parameters .aip-field-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.dialog-ai-parameters .aip-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 80px;
+  min-width: 0;
+}
+
+.dialog-ai-parameters .aip-field > span,
+.dialog-ai-parameters .aip-section-header span {
+  font-size: 10px;
+  font-weight: 600;
+  color: white;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+}
+
+.dialog-ai-parameters .aip-role-panel .aip-field > span {
+  font-weight: 400;
+}
+
+/* flex:none keeps the select from shrinking to its text height under the field's column flex, as .ed-field does. */
+.dialog-ai-parameters .aip-field input,
+.dialog-ai-parameters .aip-field select {
+  flex: none;
+  width: 100%;
+  height: var(--ed-control);
+  line-height: calc(var(--ed-control) - 2px);
+  padding: 1px 6px;
+  background: var(--color-cool-4);
+  border: 1px solid var(--color-border-light-2);
+  border-radius: 3px;
+  color: var(--color-light-3);
+  font-size: 11px;
+  box-sizing: border-box;
+}
+
+.dialog-ai-parameters .aip-field input:focus,
+.dialog-ai-parameters .aip-field select:focus {
+  border-color: var(--color-warm-1, #f4a261);
+  outline: none;
+  box-shadow: none;
+}
+
+.dialog-ai-parameters .aip-role-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dialog-ai-parameters .aip-role-panel.is-hidden {
+  display: none;
+}
+
+.dialog-ai-parameters .aip-section-header {
+  border-bottom: 1px solid var(--color-border-light-2);
+  padding-bottom: 3px;
+}
+
+/* -------------------------------------------- */
+/*  Set Combat AI on Selected                   */
+/* -------------------------------------------- */
+
+.application.dialog.emblem-ai-overwrite .window-content { overflow-y: auto !important; }
+
+/* The dialog borrows the Combat AI tray's own .acp-cond-* markup, but the rebuild declares that palette on
+   .emblem-actor-control-panel and scopes .ed-container to .dialog-editor, so both are carried here instead. The row
+   labels are left to the rebuild's unscoped `.acp-field .ed-label`. */
+.emblem-aiset {
+  --acp-card: #221d31;
+  --acp-ctrl: #282237;
+  --acp-field: #0f0d16;
+  --acp-tx: #ded9e2;
+  --acp-mu: #837c92;
+  --acp-gold: #d8b36a;
+  --acp-gold-bright: #eccf90;
+  --acp-danger: #b5766c;
+  --acp-hair: rgba(255, 255, 255, 0.06);
+  --acp-card-fx: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+.emblem-aiset.ed-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+}
+.emblem-aiset .ed-select,
+.emblem-aiset .ed-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 5px;
+  border: 0 solid;
+  font-size: 12px;
+}
+.emblem-aiset .ed-input--compact { font-size: 11px; }
+.emblem-aiset .acp-btn {
+  background: transparent;
+  border: 1px solid var(--color-border-light-2);
+  color: inherit;
+  font-size: 11px;
+  padding: 2px 10px;
+  line-height: 1.2;
+  border-radius: 3px;
+  height: auto;
+  min-height: 0;
+}
+.emblem-aiset .acp-btn:hover:not(:disabled) {
+  background: var(--color-cool-5);
+  border-color: var(--color-border-light-2);
+}
+.emblem-aiset .acp-btn-icon { width: 28px; height: 24px; padding: 0; background: transparent; border: none; }
+.emblem-aiset .acp-cond-delete { color: var(--emblem-delete, #a84343); }
+.emblem-aiset .acp-cond-delete:hover { color: var(--emblem-delete-hover, #e04b4b); }
+.emblem-aiset .acp-cond-title { font-size: 10px; }
+.emblem-aiset .acp-cond-note { font-size: 9px; }
+.emblem-aiset .ed-checkbox { width: 16px; height: 16px; min-height: 0; padding: 0; flex: 0 0 auto; }
+.emblem-aiset .aiset-block { display: flex; flex-direction: column; gap: 8px; }
+.emblem-aiset .aiset-block.is-off { opacity: 0.4; filter: saturate(0.25); pointer-events: none; }
+.emblem-aiset .aiset-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 0;
+  color: var(--acp-tx);
+  cursor: var(--cursor-pointer);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.emblem-aiset .aiset-rule { border: none; border-top: 1px solid var(--color-cool-4); margin: 2px 0; }

@@ -1,0 +1,30 @@
+<div class="ed-container aip-container">
+  <div class="ed-section">
+    <div class="aip-field-row">
+      <label class="aip-field">
+        <span>Role</span>
+        <select name="aiRole" data-tooltip="How the enemy AI may use this item">
+          {{#each roles}}
+            <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+          {{/each}}
+        </select>
+      </label>
+    </div>
+  </div>
+
+  <div class="ed-section aip-role-panel is-hidden" data-role-params="heal">
+    <div class="aip-section-header">
+      <span class="aip-section-title">Healing</span>
+    </div>
+    <div class="aip-field-row">
+      <label class="aip-field" data-tooltip="Only heal targets below this percentage of their max HP">
+        <span>Heal Below %</span>
+        <input type="number" name="aiThreshold" value="{{threshold}}" min="1" max="100" step="1" />
+      </label>
+      <label class="aip-field" data-tooltip="Expected HP restored, weighed against attacking">
+        <span>Amount</span>
+        <input type="number" name="aiAmount" value="{{amount}}" min="0" step="1" />
+      </label>
+    </div>
+  </div>
+</div>

@@ -1,0 +1,117 @@
+<section class="acp-pane acp-ai-pane {{#if isTrayAi}}is-active{{/if}}" data-tray-pane="ai" data-enemy-ai-pane>
+  <header class="acp-pane-header">
+    <i class="fas fa-brain"></i><span>Combat AI</span>
+  </header>
+
+  <div class="acp-pane-body">
+
+    <p class="acp-empty-note" data-ai-gate-note {{#if showAiProfile}}hidden{{/if}}>Combat AI applies to Neutral, Enemy and Boss actors. Change Actor Type on the Faction tab to enable it.</p>
+
+    <div class="acp-ai-controls" {{#unless showAiProfile}}hidden{{/unless}}>
+
+      <div class="acp-row acp-row-split acp-ai-head">
+        <div class="acp-field">
+          <label class="ed-label">
+            Combat AI Profile
+            <span class="acp-help-dot" data-ai-profile-help data-tooltip="{{aiProfileTooltip}}" data-tooltip-direction="RIGHT">?</span>
+          </label>
+          <select class="ed-select" data-ai-field="profile">
+            {{#each aiProfiles}}
+              <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+            {{/each}}
+          </select>
+        </div>
+
+        <div class="acp-field acp-ai-priority">
+          <label class="ed-label">
+            Priority <span class="acp-help-dot" data-tooltip="Enemy-phase order (higher acts first)"
+              data-tooltip-direction="LEFT">?</span>
+          </label>
+          <input type="number" class="ed-input" data-ai-field="priority" value="{{aiPriority}}" step="1" />
+        </div>
+      </div>
+
+      <div class="acp-field acp-ai-conditions {{#if aiIsManual}}is-disabled{{/if}}" data-ai-conditions>
+        <div class="acp-section-head">
+          <label class="ed-label">Conditions</label>
+          <button type="button" class="acp-btn acp-btn-mini" data-ai-action="addCondition">
+            <i class="fas fa-plus"></i> Add Entry
+          </button>
+        </div>
+
+        <div class="acp-cond-list">
+          {{#each aiConditions}}
+            <div class="acp-cond-entry {{#unless collapsed}}is-open{{/unless}}" data-cond-index="{{index}}">
+              <header class="acp-cond-header" data-ai-action="toggleCondition" data-index="{{index}}">
+                <i class="fas fa-chevron-down acp-cond-chevron"></i>
+                <span class="acp-cond-title" data-cond-summary>{{summary}}</span>
+                <button type="button" class="acp-btn acp-btn-icon acp-cond-delete" data-ai-action="removeCondition" data-index="{{index}}" data-tooltip="Remove entry">
+                  <i class="fas fa-trash"></i>
+                </button>
+              </header>
+
+              <div class="acp-cond-body">
+                <div class="acp-row acp-row-split">
+                  <div class="acp-field">
+                    <label class="ed-label">Target</label>
+                    <select class="ed-select ed-input--compact" data-cond-field="target" data-index="{{index}}">
+                      {{#each targetOptions}}
+                        <option value="{{value}}" {{#if selected}}selected{{/if}} {{#if disabled}}disabled{{/if}}>{{label}}</option>
+                      {{/each}}
+                    </select>
+                  </div>
+                  <div class="acp-field">
+                    <label class="ed-label">Condition</label>
+                    <select class="ed-select ed-input--compact" data-cond-field="type" data-index="{{index}}">
+                      {{#each typeOptions}}
+                        <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+                      {{/each}}
+                    </select>
+                  </div>
+                  <div class="acp-field acp-cond-num" data-cond-num-row="{{index}}" {{#unless showNum}}hidden{{/unless}}>
+                    <label class="ed-label">
+                      Num
+                      <span class="acp-help-dot" data-tooltip="Round this entry starts applying, continuing every round after" data-tooltip-direction="LEFT">?</span>
+                    </label>
+                    <input type="number" class="ed-input ed-input--compact" data-cond-field="num" data-index="{{index}}" value="{{num}}" min="1" step="1" />
+                  </div>
+                </div>
+
+                <p class="acp-cond-note" data-cond-player-note="{{index}}" {{#unless isPlayerTarget}}hidden{{/unless}}><i class="fas fa-triangle-exclamation"></i> Player conditions are saved but not yet evaluated in combat.</p>
+
+                <div class="acp-field">
+                  <label class="ed-label">Behavior</label>
+                  <select class="ed-select ed-input--compact" data-cond-field="behavior" data-index="{{index}}">
+                    {{#each behaviorOptions}}
+                      <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+                    {{/each}}
+                  </select>
+                </div>
+
+                <div class="acp-field acp-cond-profile" data-cond-profile-row="{{index}}" {{#unless showProfile}}hidden{{/unless}}>
+                  <label class="ed-label">Switch To</label>
+                  <select class="ed-select ed-input--compact" data-cond-field="profile" data-index="{{index}}">
+                    {{#each profileOptions}}
+                      <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+                    {{/each}}
+                  </select>
+                </div>
+
+                <div class="acp-field acp-cond-variable" data-cond-variable-row="{{index}}" {{#unless showVariable}}hidden{{/unless}}>
+                  <label class="ed-label">
+                    Variable
+                    <span class="acp-help-dot" data-tooltip="Squares of movement to spend, 0 for full movement" data-tooltip-direction="RIGHT">?</span>
+                  </label>
+                  <input type="number" class="ed-input ed-input--compact" data-cond-field="variable" data-index="{{index}}" value="{{variable}}" min="0" max="{{../mvmtTotal}}" step="1" />
+                </div>
+              </div>
+            </div>
+          {{else}}
+            <p class="acp-empty-note">No conditions. This unit follows its profile.</p>
+          {{/each}}
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
