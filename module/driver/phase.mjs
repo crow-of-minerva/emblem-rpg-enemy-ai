@@ -547,8 +547,26 @@ function pendingManualCount(planner) {
  */
 export function resumeAfterReload(planner) {
   if (!isCommandHost()) return Promise.resolve(false);
-  DRIVER.resumeCheck ??= resumeWhenReady(planner).finally(() => { DRIVER.resumeCheck = null; });
+  DRIVER.resumeCheck ??= resumeWhenReady(planner)
+    .then(async resumed => {
+      await releaseLeftoverHold();
+      return resumed;
+    })
+    .finally(() => { DRIVER.resumeCheck = null; });
   return DRIVER.resumeCheck;
+}
+
+/**
+ * The board hold is a world setting, so a reload mid-run leaves it standing. Once no run on this page is going,
+ * clear any hold this GM left behind so manual movement works again.
+ */
+async function releaseLeftoverHold() {
+  if (DRIVER.running || !systemIntegrated() || !isCommandHost()) return;
+  try {
+    if (await releaseBoard() === true) DRIVER.holdingBoard = false;
+  } catch (error) {
+    console.error(`${LOG} could not release a leftover board hold.`, error);
+  }
 }
 
 /** The resume check: an encounter with the AI on, the host's readiness, then each started encounter's own Scene. */
