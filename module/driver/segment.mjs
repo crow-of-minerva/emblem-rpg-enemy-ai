@@ -50,13 +50,12 @@ const NO_EXECUTION_HALT = Object.freeze({ reason: HALT_REASONS.NO_EXECUTION, act
 /**
  * What one action's result lets the run do next.
  *
- * Only a completed action, or one the system refused cleanly, lets the turn go on. A result that may hide landed
- * writes, including a refusal whose writes the dispatcher could not fully restore (`data.restored === false`), or
- * that says this client no longer executes, stops the run, because the AI never replays mechanics.
+ * Only a completed action, or one the system refused cleanly, lets the turn go on. A result that may hide saved
+ * changes, including a refusal the system could not fully undo (`data.restored === false`), or one that says this
+ * client is no longer the host, stops the run. The AI never retries an action whose outcome is unclear.
  *
- * The result codes are read from `systemResultCodes()` on each call rather than at import time, because the system
- * may not have published its API yet when this module loads. By the time a result is classified,
- * `systemIntegrated()` has already let the run start.
+ * The result codes are read on each call rather than at import, because the system may not have published its API
+ * yet when this module loads.
  * @param {*} result The system's `{ok, code, data}` result.
  * @returns {string} One of {@link ACTION_VERDICTS}.
  */
@@ -80,7 +79,7 @@ function classifyActionResult(result) {
 /* -------------------------------------------- */
 /*  Halting                                     */
 /* -------------------------------------------- */
-/** Thrown at an action boundary once the run may drive no further. It unwinds the whole turn. */
+/** Thrown before or after an action once the run must stop. It unwinds the whole turn. */
 class DriveHalted extends Error {
   constructor(halt) {
     super(`Enemy AI stopped driving: ${halt.reason}${halt.code ? ` (${halt.code})` : ''}.`);
@@ -102,13 +101,12 @@ export const NO_EXECUTION = haltedActions(NO_EXECUTION_HALT);
 /*  Runner                                      */
 /* -------------------------------------------- */
 /**
- * The host-local driver of one enemy phase's world execution. `drivePhase` in `driver/phase.mjs` builds one per run.
+ * Holds the host client's sole right to run commands for one enemy phase, through one system execution segment.
+ * `drivePhase` in `driver/phase.mjs` builds one per run, and the segment stays open across consecutive automatic units.
  *
- * It opens one execution segment for the run and keeps it across consecutive automatic units. The turn driver gets
- * gameplay methods bound to that segment alone. Each call is one system action with its own authorization, resource
- * claims and undo boundary. The runner stops at the first uncertain outcome, stops at the next action boundary when
- * asked, and never releases execution while one of its own actions can still write. A busy world is waited for
- * within the acquire bound in `EXECUTION_TIMING`.
+ * Each gameplay call is one system action, checked and undoable on its own. The run stops at the first result whose
+ * outcome is unclear, stops before the next action when asked, and never gives the segment up while one of its own
+ * actions is still running. While other gameplay is running, opening is retried up to the limit in `EXECUTION_TIMING`.
  */
 export class ExecutionSegmentRunner {
   #segment = null;
@@ -120,7 +118,7 @@ export class ExecutionSegmentRunner {
   /* -------------------------------------------- */
   /*  State                                       */
   /* -------------------------------------------- */
-  /** Whether the runner holds world execution right now. */
+  /** Whether the runner holds the execution segment right now. */
   get held() {
     return this.#segment?.held === true && this.#segment.closed !== true;
   }
@@ -130,7 +128,7 @@ export class ExecutionSegmentRunner {
     return this.#halt;
   }
 
-  /** Whether a stop was asked for, here or by staff through the system. The run halts at its next action boundary. */
+  /** Whether a stop was asked for, here or by a GM through the system. The run stops before its next action. */
   get stopRequested() {
     return this.#stopRequested || this.#segment?.stopRequested === true;
   }
@@ -144,10 +142,10 @@ export class ExecutionSegmentRunner {
   /*  Ownership                                   */
   /* -------------------------------------------- */
   /**
-   * Take world execution for the run. Only a busy world is asked again, within the runner's bound, and only while
+   * Open the execution segment for the run. Only a "busy" refusal is retried, within the time limit, and only while
    * `revalidate` still says the run is wanted.
    * @param {object} [options]
-   * @param {Function} [options.revalidate] Whether the run should still take execution.
+   * @param {Function} [options.revalidate] Whether the run is still wanted.
    * @returns {Promise<object>} The system's result, or the runner's own refusal.
    */
   async open({ revalidate = () => true } = {}) {
@@ -161,7 +159,7 @@ export class ExecutionSegmentRunner {
     return result;
   }
 
-  /** Hand world execution back for a human's turn or a dialog, once the runner's own action has settled. */
+  /** Give the segment up for a manual unit's turn, once the runner's own action has finished. */
   async release() {
     await this.#settled();
     if (!this.held) return this.#segment?.held !== true;
@@ -170,10 +168,10 @@ export class ExecutionSegmentRunner {
   }
 
   /**
-   * Take world execution back after a hand-off. The run is revalidated before every attempt and again once execution
-   * is held, because the board may have changed while the table had it.
+   * Take the segment back after a manual turn. `revalidate` is asked before every attempt and again once the segment
+   * is held, because the map may have changed while the GM played.
    * @param {object} [options]
-   * @param {Function} [options.revalidate] Whether the run is still wanted on the board as it now stands.
+   * @param {Function} [options.revalidate] Whether the run is still wanted on the map as it now stands.
    * @returns {Promise<object>} The system's result, or the runner's own refusal.
    */
   async reacquire({ revalidate = () => true } = {}) {
@@ -185,7 +183,7 @@ export class ExecutionSegmentRunner {
     return revalidate() === true ? result : refusal(RUNNER_CODES.STALE);
   }
 
-  /** Close the segment at the end of the run, once the runner's own action has settled. */
+  /** Close the segment at the end of the run, once the runner's own action has finished. */
   async close() {
     await this.#settled();
     if (!this.#segment || this.#segment.closed === true) return true;
@@ -193,14 +191,14 @@ export class ExecutionSegmentRunner {
     return this.#segment.closed === true;
   }
 
-  /** Ask the run to stop at its next action boundary. An action already in flight finishes first. */
+  /** Ask the run to stop before its next action. An action already running finishes first. */
   requestStop() {
     this.#stopRequested = true;
   }
 
   /**
-   * The action boundary: throws {@link DriveHalted} unless the run may still drive on a held segment. The turn driver
-   * also passes through it before its own writes between actions.
+   * Throws {@link DriveHalted} unless the run may still act on a held segment. Every action checks this first, and
+   * `driver/turn.mjs` also calls it before its own writes between actions.
    */
   checkpoint() {
     if (this.#halt) throw new DriveHalted(this.#halt);
@@ -213,7 +211,7 @@ export class ExecutionSegmentRunner {
   /* -------------------------------------------- */
   /*  Actions                                     */
   /* -------------------------------------------- */
-  /** This segment's gameplay methods, each wrapped as one action, with the boundary check beside them. */
+  /** This segment's gameplay methods, each wrapped as one checked action, plus `checkpoint`. */
   #bind(segment) {
     const methods = Object.entries(segmentGameplay(segment))
       .map(([name, call]) => [name, (...args) => this.#act(name, call, args)]);
@@ -238,6 +236,7 @@ export class ExecutionSegmentRunner {
     if (verdict === ACTION_VERDICTS.UNKNOWN) this.#stop(HALT_REASONS.UNKNOWN, { action: name, code });
     if (verdict === ACTION_VERDICTS.AUTHORITY) this.#stop(HALT_REASONS.AUTHORITY, { action: name, code });
     if (verdict === ACTION_VERDICTS.RELEASED) this.#stop(HALT_REASONS.RELEASED, { action: name, code });
+    // The system closes the segment when this client stops being the host during an action.
     if (this.#segment.closed === true) this.#halt ??= freezeHalt(HALT_REASONS.AUTHORITY, { action: name, code });
     return result;
   }
@@ -249,8 +248,8 @@ export class ExecutionSegmentRunner {
   }
 
   /**
-   * Ask again while only a busy world stands in the way, and only while the run is wanted. The bound is elapsed time,
-   * so a page whose timers run slow gives up when the bound has passed rather than after a count of slow attempts.
+   * Retry while the only refusal is "busy" and the run is still wanted. The limit is measured in elapsed time, so a
+   * page whose timers run slow still gives up on time.
    */
   async #acquire(attempt, revalidate) {
     const { acquirePollMs, acquireTimeoutMs } = EXECUTION_TIMING;
@@ -271,7 +270,7 @@ export class ExecutionSegmentRunner {
     }
   }
 
-  /** One pause on the segment's pacing clock, else the system's. A hidden host page slows neither. */
+  /** One pause on the segment's timer, else the system's. A hidden host tab slows neither. */
   #pause(milliseconds) {
     if (typeof this.#segment?.wait === 'function') return this.#segment.wait(milliseconds);
     return pacingWait(milliseconds);

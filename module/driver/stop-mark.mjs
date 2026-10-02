@@ -15,7 +15,6 @@ export function phaseKey(phase) {
 /**
  * Whether this phase was stopped after an uncertain outcome, by this page or by an earlier host page that recorded
  * it on the encounter before a reload. A mark an earlier phase or round left is cleared instead.
- * `driver/phase.mjs` asks before it drives, and before it offers to resume.
  */
 export function phaseStopped(state) {
   if (phaseWasStopped(phaseKey(state))) return true;

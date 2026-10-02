@@ -6,19 +6,22 @@ import { boardMemo } from './memo.mjs';
 /* -------------------------------------------- */
 /*  Board view                                  */
 /* -------------------------------------------- */
-/** The terrain a board reads as when its Scene has no terrain facts. */
+/** The terrain the planner assumes when its Scene has none. */
 const NO_TERRAIN = Object.freeze({ hasTerrain: false, defendPoints: [], travelBoundedByDistance: true });
 
-/** The board of the planner's own Scene, cached in the board memo and shared with every other caller. */
+/**
+ * The planner's view of its own Scene: the units and terrain the system reports there. Cached in the memo and shared
+ * with every other caller.
+ */
 export function board(planner) {
   return boardView(planner.sceneUuid);
 }
 
 /**
- * One Scene's board as the planner reads it: the system's facts per placed unit, each joined to the module's AI facts.
- * Its unit and terrain reads both name that Scene, so a board never describes whatever Scene the host displays. An
- * unnamed Scene reads as an empty board.
- * @param {string} sceneUuid The Scene whose board this is.
+ * One Scene as the planner reads it: what the system reports for each placed unit, joined to the unit's AI flags.
+ * Its unit and terrain reads both name that Scene, so it never describes whatever Scene the host client displays. An
+ * unnamed Scene reads as empty.
+ * @param {string} sceneUuid The Scene to read.
  * @returns {Readonly<object>}
  */
 function boardView(sceneUuid) {
@@ -52,12 +55,12 @@ function joinAiFacts(facts) {
   return Object.freeze({ ...facts, ai: readActorAi(actor) });
 }
 
-/** The unit behind a token uuid, read off the board of the Scene that Token belongs to, or null. */
+/** The unit behind a token uuid, read from the Scene that Token belongs to, or null. */
 export function unitByTokenUuid(tokenUuid) {
   return boardView(sceneUuidOfToken(tokenUuid)).byTokenUuid.get(tokenUuid) ?? null;
 }
 
-/** The unit standing behind a token id on a named Scene's board, or null. */
+/** The unit standing behind a token id on a named Scene, or null. */
 export function unitByTokenId(tokenId, sceneUuid) {
   return boardView(sceneUuid).byTokenId.get(tokenId) ?? null;
 }

@@ -31,10 +31,9 @@ function matchupOf(cData) {
 /* -------------------------------------------- */
 /**
  * Who a unit will attack on its turn, and how hard, or null when it has no attack to make. The system's threat lines
- * ask this each time an enemy is selected, from their canvas ticker, and a full plan costs a second or more of matchup
- * measurements. `runWhenIdle` therefore takes the plan in the page's idle time, a few steps per frame. The caller's
- * signal abandons a plan nobody is waiting for, and a plan the board moved under is started again, because its squares
- * and the memo it was reading no longer describe one board.
+ * ask this each time an enemy is selected. A full plan is slow, so `runWhenIdle` runs it in the page's idle time, a
+ * few steps per frame. The caller's signal abandons a plan nobody is waiting for, and a plan is started again if
+ * anything on the map changed while it ran.
  * @param {string} tokenUuid The unit asked about.
  * @param {object} [options]
  * @param {AbortSignal} [options.signal] Aborted by the caller once it no longer wants the answer.
@@ -87,7 +86,7 @@ async function assessAttackIntent(tokenUuid, { signal = null } = {}) {
   });
 }
 
-/** Hand the system the provider its selected-enemy intent line asks. `onReady` in `foundry/hooks.mjs` calls this. */
+/** Register the helper the system's threat line asks about the selected enemy's attack. */
 export function installIntentProvider() {
   return registerIntentProvider((tokenUuid, options) => assessAttackIntent(tokenUuid, options));
 }

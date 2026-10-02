@@ -44,6 +44,8 @@ function canActThisPhase(planner, unit) {
   if (!weapons.length) return false;
   const targets = collectTargets(planner, unit);
   if (!targets.length) return false;
+  // A unit with no directive holds its ground: unless a target lies within its movement plus weapon reach, its turn is
+  // ended. Teleports and free squares make distance no bound on travel, so on such maps every armed unit acts.
   if (board(planner).terrain.travelBoundedByDistance !== true) return true;
   let maxRange = 0;
   for (const weapon of weapons) maxRange = Math.max(maxRange, weapon.range.maxRange ?? 0);
@@ -102,12 +104,12 @@ export function triage(planner, units) {
 /* -------------------------------------------- */
 /*  In what order                               */
 /* -------------------------------------------- */
-/** Whether a weapon applies something harmful on a hit, which makes its wielder a softener rather than a finisher. */
+/** Whether a weapon applies something harmful on a hit. */
 function hasOnHitDebuff(weapon) {
   return weapon.onHitDebuff === true;
 }
 
-/** How much this unit softens a target up, from its break value and whether it carries an on-hit debuff. */
+/** How much this unit sets a target up for others: its best break damage, plus a bonus for an on-hit debuff. */
 function setupValueOf(unit) {
   let maxBrk = 0;
   let debuff = false;
@@ -118,7 +120,10 @@ function setupValueOf(unit) {
   return { maxBrk, debuff, value: maxBrk + (debuff ? DEBUFF_SETUP_VALUE : 0) };
 }
 
-/** Order the acting units: authored priority, then softeners, then profile, then the roster's own order. */
+/**
+ * Order the acting units: authored priority, then units whose weapons break stance or apply debuffs, then profile,
+ * then the roster's own order.
+ */
 export function orderForPhase(planner, units) {
   return units
     .map((unit, index) => ({

@@ -87,7 +87,7 @@ export function engagementRing(planner, unit, target, ranges) {
 }
 
 /**
- * Every square a hostile could strike, with how many could strike it (cached per board and shared, so don't
+ * Every square a hostile could strike, with how many could strike it (cached until the map changes and shared, so don't
  * modify it).
  */
 export function threatCells(planner, unit) {
@@ -146,7 +146,11 @@ function threatAt(threat, gx, gy, dims) {
   return worst;
 }
 
-/** What entering each square costs this unit over and above the ground, charged by its footprint's worst square. */
+/**
+ * What entering each square costs this unit over and above the ground, charged by its footprint's worst square. The
+ * system's search also takes the worst value under the footprint, so a unit larger than one square is charged for
+ * threat up to one footprint beyond its own.
+ */
 function threatPenalties(planner, unit, threat, risk) {
   const dims = { width: unit.width, height: unit.height };
   const weight = PURSUIT_TRANSIT_THREAT * risk.counterWeight;
@@ -176,8 +180,8 @@ function threatPenalties(planner, unit, threat, risk) {
 /*  Pursuit field                               */
 /* -------------------------------------------- */
 /**
- * A traversal field over the whole map, with threatened squares charged extra to cross (cached per board and shared,
- * so don't modify it).
+ * A traversal field over the whole map, with threatened squares charged extra to cross (cached until the map changes
+ * and shared, so don't modify it).
  */
 export function pursuitField(planner, unit, threat, risk, start = null, ignoreUnits = null) {
   const from = start ? cellKey(start.x, start.y) : '-';
@@ -189,9 +193,8 @@ export function pursuitField(planner, unit, threat, risk, start = null, ignoreUn
 
 /**
  * The same field searched backward from a goal, so each square's route is what walking from it to the goal costs.
- * The system's graph is directional, a teleport running pad to exit and a step between floors only where the crossing
- * allows it, so a field searched out from the goal would price the way back instead (cached per board and shared, so
- * don't modify it).
+ * Teleports and steps between floors only work one way, so a plain search out from the goal would price the trip
+ * back instead (cached until the map changes and shared, so don't modify it).
  */
 export function pursuitFieldTo(planner, unit, threat, risk, goal, ignoreUnits = null) {
   const to = cellKey(goal.x, goal.y);
@@ -201,7 +204,12 @@ export function pursuitFieldTo(planner, unit, threat, risk, goal, ignoreUnits = 
     () => buildPursuitField(planner, unit, threat, risk, { x: goal.x, y: goal.y }, ignoreUnits, true));
 }
 
-/** The field itself, built far enough out that a chase can be planned across several turns. */
+/**
+ * The field itself, built far enough out that a chase can be planned across several turns. The search stops at a
+ * movement cost of max(40, 10 × movement): beyond that Pursue falls back to walking straight at the nearest hostile,
+ * and Seize does nothing. Each square's `costByCell` is the cost of the route that best avoids threat, which can be
+ * longer than the cheapest route.
+ */
 function buildPursuitField(planner, unit, threat, risk, start, ignoreUnits, reverse = false) {
   const movement = Number(unit.movement) || 0;
   const options = {
@@ -246,7 +254,7 @@ function spreadPenalty(unit, gx, gy, allyUnits) {
   return penalty;
 }
 
-/** The living allies a unit should leave room for (cached per board and shared, so don't modify it). */
+/** The living allies a unit should leave room for (cached until the map changes and shared, so don't modify it). */
 function roomAllies(planner, unit) {
   return boardMemo(`room-allies|${unit.tokenId}`, () => board(planner).units.filter(candidate => {
     if (candidate.tokenUuid === unit.tokenUuid) return false;
@@ -338,7 +346,10 @@ export function fieldPath(field, goalX, goalY) {
   return path.reverse();
 }
 
-/** Every square this turn can afford that gets genuinely nearer the goal than the one already stood on. */
+/**
+ * Every square this turn can afford that gets genuinely nearer the goal than the one already stood on. Affordable is
+ * judged by the threat-avoiding route's cost, so a square is left out when only a threatened route reaches it in time.
+ */
 function pursuitStopCandidates(unit, field, toGoal, cap, standing, freeCells) {
   const dims = { width: unit.width, height: unit.height };
   const occupied = standableCells(unit, freeCells);

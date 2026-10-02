@@ -14,9 +14,8 @@ import { encounterState } from '../foundry/system-bridge.mjs';
 /*  The encounter                               */
 /* -------------------------------------------- */
 /**
- * The Combat on a planner's bound Scene, or null for an unbound planner. `driver/phase.mjs` and `foundry/hooks.mjs`
- * read the mode flag through it. The tracker reads the flag off its viewed Combat, and the module API finds its
- * Combat with `modeEncounter` in `foundry/system-bridge.mjs`.
+ * The Combat on the planner's Scene, or null for a planner with no Scene. The tracker and the module API find their
+ * Combat differently (`app.viewed` and `modeEncounter`).
  */
 export function encounterOf(planner) {
   if (!planner.sceneUuid) return null;

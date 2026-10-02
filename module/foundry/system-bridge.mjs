@@ -5,29 +5,26 @@ import { documentByUuid } from './flags.mjs';
 /* -------------------------------------------- */
 /*  System API version                          */
 /* -------------------------------------------- */
-/** The system's public facade, `game.emblemRpg.api`, which the system publishes at its own `init`. */
+/** The system's public API, `game.emblemRpg.api`, published at the system's own `init`. */
 function systemApi() {
   return globalThis.game?.emblemRpg?.api ?? null;
 }
 
 /**
- * Whether the system's facade is at the API version this module is written against. The system raises `api.version`
- * whenever it changes a member a companion module calls, so this one number covers every facade member used below.
- * When it answers false, `foundry/hooks.mjs` skips its ready-time wiring (committed events, the intent line and the
- * resume check) and `driver/phase.mjs` refuses to drive. Both then call `reportStandDown`.
+ * Whether the system's API is at the version this module is written against. The system raises `api.version`
+ * whenever it changes a member a companion module calls, so this one number covers every call below. When it answers
+ * false, the module skips its `ready` setup and `driver/phase.mjs` refuses to play; both call `reportStandDown`.
  */
 export function systemIntegrated() {
   const api = systemApi();
   return api !== null && Number(api.version) >= REQUIRED_API_VERSION;
 }
 
-/** Whether this page has already said why the module stands down. */
+/** Whether this page has already warned that the module cannot run. */
 let standDownReported = false;
 
 /**
- * Say why the module cannot drive: a warning the GM sees and a console error for the log. Called by
- * `foundry/hooks.mjs` when the world becomes ready and by `driver/phase.mjs` before it would drive, so it is said
- * once per page rather than once per attempt.
+ * Say why the module cannot run: a warning on screen and an error in the console, once per page.
  */
 export function reportStandDown() {
   if (standDownReported || systemIntegrated()) return;
@@ -61,7 +58,7 @@ export function systemThreatTiers() {
 }
 
 /* -------------------------------------------- */
-/*  Board and terrain reads                     */
+/*  Unit and terrain reads                      */
 /* -------------------------------------------- */
 /**
  * The encounter's phase state on a named Scene.
@@ -86,13 +83,13 @@ export function modeEncounter(reference) {
   return combat?.documentName === 'Combat' ? combat : null;
 }
 
-/** Every placed unit's facts on a named Scene. */
+/** Every placed unit's data on a named Scene. */
 export function unitBoard(sceneUuid) {
   if (!sceneUuid) return null;
   return systemApi().encounters.getBoard(sceneUuid) ?? null;
 }
 
-/** The terrain facts on a named Scene: defend points, teleports, elevations, the travel bound. */
+/** The terrain data on a named Scene: defend points, teleports, elevations, the travel bound. */
 export function terrainBoard(sceneUuid) {
   if (!sceneUuid) return null;
   return systemApi().terrain.getBoard(sceneUuid) ?? null;
@@ -185,8 +182,8 @@ export function canUse(intent) {
 
 /**
  * Grade one matchup against a target's health with the system's threat rule in `game/combat/threat.mjs`, the rule its
- * threat overlay uses. The intent line in `ui/threat-intent.mjs` passes `allowLethal: true`, which the overlay never
- * does, so a blow that would kill grades lethal there rather than severe.
+ * threat overlay uses. The selected-enemy threat line in `ui/threat-intent.mjs` passes `allowLethal: true`, which the
+ * overlay never does, so a blow that would kill grades lethal there rather than severe.
  * @param {{matchup: object|null, targetHp: number, allowLethal?: boolean}} intent
  * @returns {{tier: string, damageOnHit: number, bestCase: number}|null}
  */
@@ -217,23 +214,25 @@ export function factionsFriendly(a, b) {
 }
 
 /* -------------------------------------------- */
-/*  Command host and execution segment          */
+/*  Host client and execution segment           */
 /* -------------------------------------------- */
 /**
- * The world's command host as this client sees it, or null when the system does not say. This one read is defensive,
- * because the Foundry hooks `foundry/hooks.mjs` installs ask it before the world is ready and whether or not
- * `systemIntegrated` passed. A system too old to answer it is reported by `reportStandDown`.
+ * Which client hosts commands, as this client sees it, or null when the system does not say. This one read is
+ * defensive, because Foundry hooks ask it before the world is ready and even when the system's API is too old.
  */
 function commandHost() {
   return systemApi()?.protocol?.host?.() ?? null;
 }
 
-/** Whether this client is the one full-GM host that executes, and so drives, for the whole table. */
+/** Whether this is the host client: the one GM client, on one tab, that runs every command and plays the AI. */
 export function isCommandHost() {
   return commandHost()?.localIsHost === true;
 }
 
-/** The refusal the system gives a client that is not the command host. */
+/**
+ * The refusal code for a client that is not the host client. It follows the system's rule, except that a GM with
+ * two tabs open gets NO_ACTIVE_GM here where the system answers SOCKET_MULTIPLE_HOSTS.
+ */
 export function hostRefusalCode() {
   return commandHost()?.state === systemHostStates().MULTIPLE_HOSTS
     ? systemResultCodes().SOCKET_MULTIPLE_HOSTS
@@ -250,17 +249,17 @@ export async function commandHostStatus() {
   }
 }
 
-/** Open a host-local execution segment, which only the command host may do. */
+/** Open an execution segment, which gives the host client the sole right to run commands until it is closed. */
 export async function openExecutionSegment(label) {
   return systemApi().protocol.openExecutionSegment({ label });
 }
 
-/** The processing hold this client follows, as the system's blocker reports it, or null when nothing holds it. */
+/** What the system reports is running right now, if anything; its `owner` says who is running it. */
 export function processingView() {
   return systemApi().protocol.execution();
 }
 
-/** Ask the command host to stop the open execution segment at its next safe boundary. The host checks for staff. */
+/** Ask the host client to stop the open execution segment after its current action. Only a GM or Assistant GM may. */
 export async function requestSegmentStop() {
   try {
     return await systemApi().protocol.requestSegmentStop();
@@ -270,7 +269,7 @@ export async function requestSegmentStop() {
   }
 }
 
-/** A pause on the system's pacing clock, which a hidden host page cannot slow. */
+/** A pause on the system's timer, which a hidden host tab does not slow down. */
 export function pacingWait(milliseconds) {
   return Promise.resolve(systemApi().protocol.wait(Math.max(0, Number(milliseconds) || 0)));
 }
@@ -291,7 +290,7 @@ const SEGMENT_GAMEPLAY = Object.freeze({
 /** The names of the gameplay methods a turn may call. */
 export const SEGMENT_GAMEPLAY_METHODS = Object.freeze(Object.keys(SEGMENT_GAMEPLAY));
 
-/** One segment's gameplay methods by name, each calling that segment's API and never the global facade. */
+/** One segment's gameplay methods by name, each calling that segment's API, never the global `game.emblemRpg.api`. */
 export function segmentGameplay(segment) {
   return Object.fromEntries(Object.entries(SEGMENT_GAMEPLAY)
     .map(([name, call]) => [name, (...args) => call(segment.api, ...args)]));
@@ -301,8 +300,8 @@ export function segmentGameplay(segment) {
 /*  Driven board hold                           */
 /* -------------------------------------------- */
 /**
- * Claim the system's driven-board hold for this module, naming the unit on the move. The system answers null while
- * another client holds the board. `driver/phase.mjs` takes it for the run and again for each unit.
+ * Take the system's driven-board hold for this module, naming the unit on the move. The hold is a world setting that
+ * shows a banner and blocks manual movement. The system answers null while someone else holds it.
  */
 export function holdBoard({ label, tokenName = '', tokenImg = '' }) {
   return systemApi().encounters.driven.hold({ driverId: MODULE_ID, label, tokenName, tokenImg });
@@ -314,9 +313,9 @@ export function releaseBoard() {
 }
 
 /* -------------------------------------------- */
-/*  Board barrier and presentation              */
+/*  Waiting and presentation                    */
 /* -------------------------------------------- */
-/** Block until the board has been continuously quiet for the settle window. */
+/** Wait until the map has been quiet for the given window. */
 export function awaitBoardSettled(options) {
   return systemApi().board.awaitSettled(options);
 }

@@ -113,7 +113,7 @@ function eventSceneUuid(data) {
   return String(data.sceneUuid || sceneUuidOfToken(data.sourceTokenUuid ?? ''));
 }
 
-/** Every placed unit's faction role by actor uuid, read off the board of the Scene the action happened on. */
+/** Every placed unit's faction role by actor uuid, read from the Scene the action happened on. */
 function factionRoles(sceneUuid) {
   const roles = new Map();
   for (const unit of unitBoard(sceneUuid)?.units ?? []) roles.set(unit.actorUuid, unit.factionRole);
@@ -124,10 +124,10 @@ function factionRoles(sceneUuid) {
 /*  Writes in flight                            */
 /* -------------------------------------------- */
 /**
- * Hold the driver until every mark write the event handlers started has finished, or the time limit has passed.
- * `driver/phase.mjs` waits here before it reads the roster and before each unit's turn, so the planner reads the marks
- * the system's committed events asked for. A write still running at the limit is given up on, so a hung write costs
- * the run one wait rather than one per unit. The board memo is dropped afterwards, since a landed mark changes it.
+ * Wait until every mark write the event handlers started has finished, or the time limit passes. The driver waits
+ * here before it reads the units and before each turn, so plans see the latest marks. Writes still running at the
+ * limit are forgotten, so a stuck write delays the run once rather than once per unit. The cached map data is cleared
+ * afterwards.
  * @returns {Promise<boolean>} False when the limit passed with a write still running.
  */
 export async function awaitMarkWrites() {
@@ -143,7 +143,7 @@ export async function awaitMarkWrites() {
 }
 
 /**
- * Keep one handler's write in `writesInFlight` until it settles. `write` logs a failed Actor update itself. Anything
+ * Keep one handler's write in `writesInFlight` until it finishes. `write` logs a failed Actor update itself. Anything
  * else that fails on the way is logged here, since the hook that called the handler drops its promise.
  */
 function inFlight(work) {

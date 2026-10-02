@@ -55,9 +55,8 @@ function unitBehaviorBadge(unit) {
 /*  Injection                                   */
 /* -------------------------------------------- */
 /**
- * Put the Enemy AI switch and the behaviour badges into a rendered tracker, for GMs only. The
- * `renderEmblemCombatTracker` hook in `foundry/hooks.mjs` calls it on every render, and it removes its own earlier
- * switch and badges first.
+ * Put the Enemy AI switch and the behaviour badges into a rendered tracker, for GMs only. It runs on every render
+ * and removes its own earlier switch and badges first.
  */
 export function injectTrackerControls(app, element) {
   const root = element ?? app?.element ?? null;
@@ -102,8 +101,8 @@ function switchClasses(context) {
 }
 
 /**
- * One press of the switch. While processing holds the world the mode flag cannot be written, so a press asks the host
- * to stop the Enemy AI's execution segment at a safe boundary instead. Otherwise it steps the mode on.
+ * One press of the switch. While the system is busy running commands the flag can't be changed, so a press asks the
+ * host to stop the AI after its current action. Otherwise it steps the mode on.
  */
 async function pressSwitch(event, app) {
   event.preventDefault();
@@ -131,7 +130,7 @@ async function stopDuringProcessing(owner) {
   else notify.info('Enemy AI will stop after its current action.');
 }
 
-/** Why the host would not take a stop request, in words staff can act on. */
+/** Why the host would not take a stop request, in words a GM can act on. */
 function stopRefusalReason(code) {
   const codes = systemResultCodes();
   if (code === codes.GM_REQUIRED) return 'only a GM or Assistant GM may stop it';
@@ -171,13 +170,9 @@ function reportMissingAnchor(selector, template) {
 }
 
 /**
- * Whether a Combat document belongs to the tracker's own Scene: `canvas.scene`, or the active Scene when nothing is
- * viewed. That is the Scene the system's tracker reads, and `findSceneCombat` in
- * `foundry/adapters/projections/encounters.mjs` answers the same question. This check doesn't read `app.viewed`,
- * which follows Foundry's own combat selection instead. The system's `templates/menus/combat-tracker.hbs` renders
- * `.ect-toggles` for a running or a paused encounter and leaves it out otherwise, so a missing switch anchor is
- * reported only when a Combat exists. A paused encounter has no Combat document, so its switch does nothing when
- * pressed.
+ * Whether the Scene the system's tracker shows (the canvas Scene, else the active Scene) has a Combat. The tracker
+ * leaves the switch's anchor out when there is no encounter, so a missing anchor is only reported when a Combat
+ * exists. The switch itself reads `app.viewed`, Foundry's selected Combat, which is normally the same encounter.
  */
 function sceneHasCombat() {
   const scene = canvas.scene ?? game.scenes.active ?? null;

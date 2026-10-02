@@ -95,7 +95,7 @@ export function changesSpawnBehavior(changed) {
 
 /**
  * Copy the terrain spawn's order into the Actor's conditions once, as a last Always entry the GM can edit or remove.
- * `onUpdateActor` in `foundry/hooks.mjs` calls it when the flag lands, and the Control Panel tray when it renders.
+ * Runs when the flag arrives on the Actor, and when the Actor Control Panel draws its AI tab.
  */
 export async function adoptSpawnBehavior(actor) {
   const spawn = spawnBehaviorOf(actor);
@@ -175,7 +175,10 @@ export async function writeCombatMode(combat, mode) {
   return true;
 }
 
-/** Whether an update carries a change to the module's mode flag, its removal included. */
+/**
+ * Whether an update sets or removes the module's mode flag. Removing the module's whole flag scope is only caught in
+ * the older `-=` form.
+ */
 export function changesCombatMode(changed) {
   const flags = changed.flags;
   const scope = flags?.[MODULE_ID];
@@ -200,7 +203,7 @@ export function readStopMark(combat) {
   };
 }
 
-/** Record the Scene, encounter, phase and round where the Enemy AI stopped. Only the command host writes it. */
+/** Record the Scene, encounter, phase and round where the Enemy AI stopped. Only the host client writes it. */
 export async function writeStopMark(combat, { sceneUuid, combatUuid, phase, round }) {
   if (!combat) return false;
   await combat.setFlag(MODULE_ID, COMBAT_FLAGS.STOPPED_PHASE, {
@@ -235,7 +238,7 @@ export function readPausedMode(scene) {
   return AI_MODES.includes(raw) ? raw : null;
 }
 
-/** Set a paused encounter's mode aside on its Scene. Only the command host writes it. */
+/** Set a paused encounter's mode aside on its Scene. Only the host client writes it. */
 export async function writePausedMode(scene, mode) {
   if (!scene || !AI_MODES.includes(mode)) return false;
   await scene.setFlag(MODULE_ID, SCENE_FLAGS.PAUSED_MODE, mode);

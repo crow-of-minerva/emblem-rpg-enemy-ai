@@ -59,7 +59,7 @@ class TurnRun {
     if (this.onEngage) await this.onEngage();
   }
 
-  /** Re-read the acting unit off a freshly invalidated board, which every command makes necessary. */
+  /** Re-read the acting unit with the cached map data cleared, since any command may have changed it. */
   refresh() {
     invalidateBoardMemo();
     this.unit = unitByTokenUuid(this.unit.tokenUuid) ?? this.unit;
@@ -82,8 +82,8 @@ function idleResult(reason) {
 /* -------------------------------------------- */
 /**
  * Play one unit's turn with the run's gameplay methods. The checks run in priority order: a profile switch, fear,
- * Passive, a status that holds the unit, a movement directive, a broken stance, then the action loop.
- * `driver/phase.mjs` calls this once per queued unit, and every plan comes from the planner functions in `planner/`.
+ * Passive, a status that holds the unit, a movement directive, a broken stance, then the action loop. Every plan
+ * comes from the planner functions in `planner/`.
  * @param {object} planner The Scene's planner.
  * @param {object} unit The unit as the queue held it.
  * @param {object} [options] `onEngage` fires before the unit visibly acts. `actions` is the segment's gameplay.
@@ -182,8 +182,8 @@ export async function endTurn(unit, { restoreStance = true, actions = NO_EXECUTI
 }
 
 /**
- * End the turn of a unit whose turn threw, so `driver/phase.mjs` can go on to the next unit. The system restores the
- * failed action's snapshot itself, at once or when the host page reloads.
+ * End the turn of a unit whose turn threw an error, so the phase can still finish. The system undoes the failed
+ * action itself, at once or when the host page reloads.
  */
 export async function recoverFailedUnit(unit, actions = NO_EXECUTION) {
   try {
@@ -302,6 +302,7 @@ async function runActionLoop(planner, run, risk, primary) {
  */
 async function choosePlan(planner, run, risk, primary) {
   const moveBudget = primary?.budget ?? null;
+  // planTurn runs synchronously, so this await does not let the page draw or handle input while it plans.
   const plan = await planTurn(planner, run.unit, risk, {
     stationary: run.stationary, seizeBlocker: run.seizeBlocker, seizeUnlock: run.seizeUnlock, moveBudget
   });
@@ -349,11 +350,9 @@ async function takeCrossing(planner, run, crossing) {
 }
 
 /**
- * Take a flier grounded by a stance break back into the air. Like a crossing, the flight action competes only with
- * doing nothing worthwhile, since it spends the action and ends the turn. A unit with a blow to strike from the
- * ground strikes instead and rises on a later turn. A taunted unit that cannot reach its taunter walks as close as it
- * can first, with no crossing, which would spend the action, and rises at the end of that walk (performPlan and
- * closeWithMovement). A refused take-off is not asked for again this turn.
+ * Take a flier that a stance break grounded back into the air. Flying uses the whole action and ends the turn, so it
+ * is only chosen when there is nothing better to do. A taunted unit walks toward its taunter first, without a
+ * crossing, and rises at the end of that walk. A refused take-off is not tried again this turn.
  */
 async function takeOffAgain(run) {
   await run.engage();

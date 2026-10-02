@@ -39,7 +39,7 @@ export function sanitizeConditionEntry(raw) {
   };
 }
 
-/** Read stored conditions without turning an unknown condition or order into a valid one. */
+/** Read saved conditions, keeping unknown types or behaviours as they are so they never fire. */
 export function normalizeStoredConditionEntry(raw) {
   return Object.freeze({
     ...sanitizeConditionEntry(raw),
@@ -124,14 +124,14 @@ export function resolveDirective(unit, context = {}) {
   return null;
 }
 
-/** The unit's authored conditions, followed by its terrain spawn order as an extra Always entry. */
+/** The unit's authored conditions, followed by its terrain spawn behaviour as an extra Always entry. */
 function conditionEntriesOf(unit) {
   const authored = unit.conditions;
   const trailing = spawnConditionEntry(unit.spawnBehavior);
   return trailing ? [...authored, trailing] : authored;
 }
 
-/** The terrain spawn's order as an Always condition entry, or null when it isn't a known behaviour. */
+/** The terrain spawn's behaviour as an Always condition entry, or null when it isn't a known behaviour. */
 export function spawnConditionEntry(spawn) {
   if (!AI_BEHAVIOR_VALUES.includes(spawn)) return null;
   return { target: 'self', type: 'always', behavior: spawn, profile: null, variable: 0, num: AI_ROUND_MIN };

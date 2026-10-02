@@ -26,8 +26,8 @@ import { averageDamage } from './vocabulary.mjs';
 /* -------------------------------------------- */
 /**
  * One matchup as the exchange would resolve it, measured from a hypothetical square. `ground` passes the square's
- * terrain and aura values, which anchorPropertiesSteps in `planning.mjs` has already read. The system works out any
- * part left out itself, and rebuilding the aura board for each matchup is most of what that costs.
+ * terrain and aura values, which anchorPropertiesSteps in `planning.mjs` has already read; the system reads any part
+ * left out itself, which is slow for auras.
  */
 export function measure(attacker, defender, weapon, distance, dmgType = null,
   { targetFlanked = false, attackerFlanked = false, standing = null, defenderWeaponId, ground = null } = {}) {
@@ -45,7 +45,10 @@ export function measure(attacker, defender, weapon, distance, dmgType = null,
   }) ?? null;
 }
 
-/** The ground values to pass to the system: terrain the planner priced, and aura fields only when there are some. */
+/**
+ * The ground values to pass to the system: terrain the planner priced, and aura fields only when the record has some.
+ * An empty aura record is left out, so the system reads the square's auras again.
+ */
 function suppliedGround(ground) {
   const supplied = {};
   if (ground?.terrain) supplied.terrainModifiers = ground.terrain;
@@ -196,10 +199,9 @@ export function score(cData, unit, defender, risk, position = null, blockerUnloc
 
 /**
  * How one side of a matchup lands its damage type on the other: 1 on a vulnerability, -1 on a protection, 0
- * otherwise. score reads this unit's blow off the matchup and the counter off its `defender`. The system works out
- * both for the exchange being weighed: this unit attacking from the square with the weapon it would swing, the
- * defender answering with the weapon it holds. A side that rolls its type per blow counts as 0, since the matchup
- * names only the first type it could roll. Immunity needs no sign, because the measured damage is already nothing.
+ * otherwise. score reads this unit's blow off the matchup and the counter off its `defender`. A side that rolls its
+ * type per blow counts as 0, since the matchup names only the first type it could roll. Immunity needs no sign,
+ * because the measured damage is already nothing.
  */
 function typeAffinity(side) {
   if (!side || side.randomizeDamageType === true) return 0;

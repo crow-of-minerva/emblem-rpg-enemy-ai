@@ -1,9 +1,9 @@
 /** @layer planner */
 /*
- * The board questions the Enemy AI planner asks about squares: where a unit can move, whether it could attack or
+ * The questions the Enemy AI planner asks about squares on the map: where a unit can move, whether it could attack or
  * see a target from a square, the terrain, aura and hazard effects there, and which hostiles could reach it. Most
  * answers come from the system through system-bridge.mjs and are cached with boardMemo (memo.mjs) until
- * something on the board changes. The main caller is planning.mjs.
+ * something on the map changes. The main caller is planning.mjs.
  */
 import {
   auraFieldsAt,
@@ -27,7 +27,7 @@ import { cellKey, footprintDistance } from './vocabulary.mjs';
 /* -------------------------------------------- */
 /**
  * Every square the unit could end its move on (its "anchors"), plus the movement graph they came from. The square
- * it's standing on is always included. Used by planning.mjs, movement.mjs, pursuit.mjs and seize.mjs.
+ * it's standing on is always included.
  */
 export function reachableAnchors(unit, { ignoreTurnState = false, stationary = false } = {}) {
   if (stationary) return anchorField(unit, { stationary: true, attackReach: false });
@@ -60,7 +60,10 @@ export function moveCostAt(graph, x, y) {
   return graph?.costByCell?.[cellKey(x, y)] ?? Infinity;
 }
 
-/** The distance the unit could attack the target from at this square, or null if it can't (cached per board). */
+/**
+ * The distance the unit could attack the target from at this square, or null if it can't (cached until the map
+ * changes). No weapon sight rule is passed, so a weapon set to Ignore LoS or Ignore Elev. is checked as a normal one.
+ */
 export function engagementIsPossible(unit, anchorX, anchorY, target, range) {
   const key = `engage|${unit.tokenId}|${anchorX},${anchorY}|${target.tokenId}|${range.minRange}-${range.maxRange}`;
   return boardMemo(key, () => canEngage({
@@ -71,7 +74,10 @@ export function engagementIsPossible(unit, anchorX, anchorY, target, range) {
   }));
 }
 
-/** Whether walls or terrain height would block the unit's sight to the target from this square (cached per board). */
+/**
+ * Whether walls or terrain height would block the unit's sight to the target from this square (cached until the map
+ * changes).
+ */
 export function sightBlocked(unit, anchorX, anchorY, target, losRule = 'normal') {
   const key = `los|${unit.tokenId}|${anchorX},${anchorY}|${target.tokenId}|${losRule}`;
   return boardMemo(key, () => sightIsBlocked({
@@ -85,7 +91,7 @@ export function sightBlocked(unit, anchorX, anchorY, target, losRule = 'normal')
 /* -------------------------------------------- */
 /*  Ground                                      */
 /* -------------------------------------------- */
-/** The terrain's evasion, defense and resistance bonuses for the unit at this square (cached per board). */
+/** The terrain's evasion, defense and resistance bonuses for the unit at this square (cached until the map changes). */
 export function terrainModsAt(unit, gx, gy) {
   return boardMemo(`terrain|${unit.tokenId}|${gx},${gy}`, () => {
     const mods = terrainModifiersAt(unit.tokenUuid, { x: gx, y: gy }) ?? {};
@@ -94,8 +100,8 @@ export function terrainModsAt(unit, gx, gy) {
 }
 
 /**
- * The aura effects the unit would have at this square (cached per board), with a signature string so squares
- * with identical auras can share one measurement.
+ * The aura effects the unit would have at this square (cached until the map changes), with a signature string so
+ * squares with identical auras can share one measurement.
  */
 export function auraModsAt(unit, gx, gy) {
   return boardMemo(`aura|${unit.tokenId}|${gx},${gy}`,
@@ -117,7 +123,10 @@ export function primeAuraMods(unit, squares) {
   }
 }
 
-/** Damage a hazard would deal the unit at the start of a phase if it stood on this square (cached per board). */
+/**
+ * The HP change terrain would give the unit at phase start on this square, negative for damage (cached until the map
+ * changes).
+ */
 export function hazardAt(unit, gx, gy) {
   return boardMemo(`hazard|${unit.tokenId}|${gx},${gy}`, () => groundHazardAt(unit.tokenUuid, { x: gx, y: gy }));
 }
@@ -139,7 +148,10 @@ export function elevationAt(planner, x, y, dims = { width: 1, height: 1 }) {
 /* -------------------------------------------- */
 /*  Occupancy                                   */
 /* -------------------------------------------- */
-/** Occupied cells as this unit's movement field reports them (cached per board and shared, so don't modify it). */
+/**
+ * Occupied cells as this unit's movement field reports them (cached until the map changes and shared, so don't modify
+ * it).
+ */
 export function occupiedCells(unit) {
   return boardMemo(`occupied|${unit.tokenId}`, () => {
     const field = movementField(unit.tokenUuid, { stationary: true, attackReach: false });
@@ -164,7 +176,7 @@ export function flankedAt(unit, anchorX, anchorY, target = null) {
   return flankingFrom(unit, anchorX, anchorY, target).flanked === true;
 }
 
-/** The system's flanking check from this square (api.combat.flanking), cached per board for the two above. */
+/** The system's flanking check from this square (api.combat.flanking), cached for the two above. */
 function flankingFrom(unit, anchorX, anchorY, target) {
   const key = `flank|${unit.tokenId}|${anchorX},${anchorY}|${target?.tokenId ?? '-'}`;
   return boardMemo(key, () => flankingAt({
@@ -174,7 +186,7 @@ function flankingFrom(unit, anchorX, anchorY, target) {
   }));
 }
 
-/** Footprints and weapon ranges of every hostile that can still act, for exposureAt (cached per board). */
+/** Footprints and weapon ranges of every hostile that can still act, for exposureAt (cached until the map changes). */
 export function threatRectsFor(planner, unit) {
   return boardMemo(`threat-rects|${unit.tokenId}`, () => buildThreatRects(planner, unit));
 }
@@ -190,7 +202,10 @@ function buildThreatRects(planner, unit) {
   return rects;
 }
 
-/** Ids of hostiles that could attack a unit standing here (ids, so the caller can skip the one it's attacking). */
+/**
+ * Ids of hostiles whose weapon range covers this square from where they stand now; their movement and sight are not
+ * considered. Ids, so the caller can skip the one it's attacking.
+ */
 export function exposureAt(dims, rects, anchorX, anchorY) {
   const ids = new Set();
   for (const rect of rects) {

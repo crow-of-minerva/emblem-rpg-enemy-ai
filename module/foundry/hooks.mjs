@@ -58,15 +58,15 @@ export function installEnemyAiHooks() {
     injectItemParametersButton(application, element, context));
 }
 
-/** Publish the module API, whether or not the system's API version turns out to pass `systemIntegrated`. */
+/** Publish the module API, even when the system's API turns out to be too old for the rest of the module. */
 function onInit() {
   const module = game.modules.get(MODULE_ID);
   if (module) module.api = createEnemyAiApi();
 }
 
 /**
- * Wire the committed events, the intent line and the resume check once the system's API version passes
- * `systemIntegrated`, or say once why the module stands down.
+ * Once the world is ready, listen for the system's events, register the threat-line helper and offer to resume, or
+ * warn once that the system's API is too old.
  */
 function onReady() {
   if (!systemIntegrated()) {
@@ -74,6 +74,7 @@ function onReady() {
     return;
   }
   const events = systemEventTypes();
+  // The system publishes these events only on the host client, so these handlers run only there.
   onCommittedEvent(events.ENCOUNTER_PHASE_ADVANCED, onPhaseAdvanced);
   onCommittedEvent(events.COMBAT_EXCHANGE_COMMITTED, onExchangeCommitted);
   onCommittedEvent(events.ITEM_ACTIVATION_COMMITTED, onActivationCommitted);
@@ -87,8 +88,8 @@ function onReady() {
 /*  Committed events                            */
 /* -------------------------------------------- */
 /**
- * On a phase change, on the command host only: a one-round mode switches itself off when the player phase begins,
- * and an enemy phase with the AI on starts a run on the Scene the event names.
+ * On the host client: when the player phase starts, turn "On" back to "Off"; when the enemy phase starts with the AI
+ * on, play it on the Scene the event names.
  */
 function onPhaseAdvanced(event) {
   if (!isCommandHost()) return;
@@ -125,7 +126,7 @@ function onEncounterClosed(event) {
   return onEncounterEnded(event);
 }
 
-/** On the command host, a resumed battle takes back the mode its pause set aside. */
+/** On the host client, a resumed battle takes back the mode its pause set aside. */
 function onEncounterBegan(event) {
   if (!isCommandHost()) return;
   const sceneUuid = String(event?.data?.sceneUuid ?? '');
@@ -138,8 +139,8 @@ function onEncounterBegan(event) {
 /*  Document hooks                              */
 /* -------------------------------------------- */
 /**
- * Start or abort the AI when its mode flag is written or removed on an encounter. Any change to Off stops a run driving
- * that encounter at its next safe boundary. A start runs on the encounter's own Scene.
+ * Start or abort the AI when its mode flag is written or removed on an encounter. Any change to Off stops the running
+ * enemy phase after its current action. A start runs on the encounter's own Scene.
  */
 function onUpdateCombat(combat, changed) {
   if (!isCommandHost()) return;
@@ -158,7 +159,7 @@ function onUpdateCombat(combat, changed) {
 
 /**
  * A deleted encounter takes its Scene's battle memory with it, unless the system deleted it to pause the battle.
- * On the command host, the paused Combat's mode is noted for `onEncounterClosed` to set aside.
+ * On the host client, the paused Combat's mode is noted for `onEncounterClosed` to set aside.
  */
 function onDeleteCombat(combat) {
   const sceneUuid = String(combat?.scene?.uuid ?? '');
@@ -177,16 +178,18 @@ function onUpdateActor(actor, changed) {
 }
 
 /**
- * When the canvas is drawn, drop the board memo, then offer to pick an interrupted phase up. The battle memory stays:
- * each Scene keeps its own, and only an ended encounter clears it, so a Scene switch mid-battle or during a pause
- * loses nothing.
+ * When the canvas is drawn, clear the cached map data and offer to resume an interrupted phase. Each Scene keeps its
+ * own battle memory until its encounter ends, so switching Scenes mid-battle or during a pause loses nothing.
  */
 function onCanvasReady() {
   invalidateBoardMemo();
   resumeAfterReload(CombatAI).catch(error => console.error(`${LOG} the resume check failed.`, error));
 }
 
-/** Refuse a non-GM write that touches the module's flag scope, since only a GM authors AI settings. */
+/**
+ * Block a non-GM user's update that touches this module's flags. Foundry runs preUpdate hooks only on the client
+ * making the change, so this guards the user interface; it is not a permission check.
+ */
 function vetoForeignFlagWrite(changed, userId) {
   if (isGamemaster(userId)) return true;
   if (!touchesModuleFlags(changed)) return true;

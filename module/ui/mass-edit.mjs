@@ -226,6 +226,10 @@ function syncRow(root, state, index) {
   if (summary) summary.textContent = conditionSummary(entry);
 }
 
+/**
+ * Grey out the blocks that won't be written. Conditions are also greyed while the profile is being set to Manual,
+ * but `applyToTargets` still writes them when "Overwrite Conditions" is ticked.
+ */
 function syncScopes(root, dialog, state) {
   const manual = state.profile === AI_MANUAL_PROFILE;
   root.querySelector('[data-scope-body="profile"]')?.classList.toggle('is-off', !state.writeProfile);

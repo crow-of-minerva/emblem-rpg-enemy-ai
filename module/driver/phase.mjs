@@ -44,7 +44,7 @@ import { endTurn, recoverFailedUnit, takeTurn } from './turn.mjs';
 /* -------------------------------------------- */
 /*  One run                                     */
 /* -------------------------------------------- */
-/** One enemy phase as it is being driven: its queue, its casualties, its execution, and how it ended. */
+/** One enemy phase as the AI plays it: its queue, the units that failed, its execution segment, and how it ended. */
 class PhaseRun {
   constructor(state) {
     this.summary = [];
@@ -82,7 +82,10 @@ class PhaseRun {
       || Boolean(this.acquireRefused || this.reacquireRefused || this.segment.halt);
   }
 
-  /** Whether the run stopped on an outcome nobody can vouch for, so its phase must not be driven again. */
+  /**
+   * Whether the run stopped because an action's result is unknown or this client stopped being the host, so this
+   * phase must not be played again.
+   */
   get uncertain() {
     const reason = this.segment.halt?.reason;
     return reason === HALT_REASONS.UNKNOWN || reason === HALT_REASONS.AUTHORITY;
@@ -93,10 +96,9 @@ class PhaseRun {
 /*  The phase driver                            */
 /* -------------------------------------------- */
 /**
- * Drive the whole enemy phase on one Scene, one unit at a time, inside one host-local execution segment. The Scene
- * is the one named, else the planner's own, else the one started encounter's, and never the Scene the host displays.
- * `foundry/hooks.mjs` calls this when the enemy phase begins or the mode flag turns the AI on, and the module API
- * and `offerResume` call it too.
+ * Play the whole enemy phase on one Scene, one unit at a time, inside one execution segment on the host client. The
+ * Scene is the one named, else the planner's own, else the only started encounter's, never simply the Scene the host
+ * is viewing. Runs when the enemy phase begins, or when the AI is switched on during it.
  * @param {object} planner The planner the caller holds, rebound here to the encounter's own Scene.
  * @param {{sceneUuid?: string}} [intent] The encounter's Scene.
  * @returns {Promise<object[]>} What each unit did.
@@ -149,8 +151,8 @@ async function drivePhase(planner, state) {
 }
 
 /**
- * Settle the phase in, take world execution and the board, let the aggression marks still being written land, then
- * split and order the roster before anybody acts.
+ * Wait for a quiet map, take the execution segment and the board hold, and wait for aggression marks still being
+ * saved. Then end the turns of idle units and put the rest in acting order.
  */
 async function preparePhase(planner, run) {
   if (!await awaitSettled({ label: 'the enemy phase' })) run.stalled = true;
@@ -176,7 +178,7 @@ async function preparePhase(planner, run) {
   run.queue = run.blocked ? [] : orderForPhase(planner, [...acting, ...roster.manual]);
 }
 
-/** End the turns of every unit that provably has nothing to do this phase. */
+/** End the turns of units that have nothing to do as the phase starts. */
 async function endIdleTurns(run, idle) {
   for (const unit of idle) {
     if (!phaseStillCurrent(run)) {
@@ -204,8 +206,8 @@ async function endIdleTurns(run, idle) {
 }
 
 /**
- * Play the queue one unit at a time, with the camera on and a settle wait before every turn. A unit that should let
- * a pending ally move first (`yieldsToPendingAlly`) goes to the back of the queue, once per phase.
+ * Play the queue one unit at a time, with the camera on and a wait for a quiet map before every turn. A unit that
+ * should let a pending ally move first (`yieldsToPendingAlly`) goes to the back of the queue, once per phase.
  */
 async function runQueue(planner, run) {
   if (!run.queue.length) return;
@@ -236,8 +238,8 @@ async function runQueue(planner, run) {
 }
 
 /**
- * The wait before a turn, which also protects the planning the turn is about to do. The board settles first, then
- * any aggression marks `driver/aggression.mjs` is still writing finish, so the plan sees them.
+ * The wait before a turn: first for a quiet map, then for any aggression marks still being saved, so the unit's plan
+ * sees them.
  */
 async function readyForTurn(run, unit) {
   const settled = await awaitSettled({ label: `${unit.name}'s turn` });
@@ -296,8 +298,8 @@ async function playUnit(planner, run, unit) {
 /*  Manual turns                                */
 /* -------------------------------------------- */
 /**
- * A manual unit pauses the run: the board hold and world execution go back to the table for that one turn, and the
- * run takes both back once the GM ends it.
+ * A manual unit pauses the run: the board hold and the execution segment are given up for that one turn, and the run
+ * takes both back once the GM ends it.
  */
 async function holdForManual(planner, run, unit) {
   await camera('focus', unit.tokenUuid);
@@ -324,7 +326,7 @@ async function holdForManual(planner, run, unit) {
   return phaseStillCurrent(run);
 }
 
-/** Hold the run while the GM plays units by hand, polling a fresh board read until their turns close. */
+/** Wait while the GM plays units by hand, re-reading the map on a short timer until their turns end. */
 async function awaitManualTurns(planner, units, run) {
   const pending = () => units
     .map(entry => unitByTokenUuid(entry.tokenUuid))
@@ -349,11 +351,12 @@ async function awaitManualTurns(planner, units, run) {
 }
 
 /* -------------------------------------------- */
-/*  Holding the board and world execution       */
+/*  Board hold and execution segment            */
 /* -------------------------------------------- */
 /**
- * Take the driven-board hold for the AI and start listening for the abort gesture. Does nothing when the AI already
- * holds the board.
+ * Take the system's driven-board hold and start listening for the double-Space abort. The hold is a world setting: it
+ * shows a banner, blocks manual movement for everyone, and survives a reload. `DRIVER.holdingBoard` is only this
+ * page's memory of having taken it. Does nothing when this page already holds it.
  */
 async function takeTheBoard() {
   if (DRIVER.holdingBoard) return true;
@@ -363,7 +366,7 @@ async function takeTheBoard() {
   return true;
 }
 
-/** Hand the board back, for a manual unit's turn or at the end of the run, and stop listening for the abort key. */
+/** Release the board hold, for a manual unit's turn or at the end of the run, and stop listening for the abort key. */
 async function releaseTheBoard() {
   if (!DRIVER.holdingBoard) return true;
   if (await releaseBoard() !== true) return false;
@@ -377,7 +380,7 @@ function runStillWanted(planner, run) {
   return !abortWanted() && isEnabled(encounterOf(planner)) && phaseStillCurrent(run);
 }
 
-/** Take world execution for the run, waiting only while the run is still wanted. */
+/** Open the run's execution segment, waiting only while the run is still wanted. */
 async function openSegment(planner, run) {
   const result = await run.segment.open({ revalidate: () => runStillWanted(planner, run) });
   if (result?.ok === true) return true;
@@ -391,7 +394,7 @@ async function openSegment(planner, run) {
   return false;
 }
 
-/** Take world execution back after a manual unit's turn. The run is checked again before and after it is held. */
+/** Take the execution segment back after a manual unit's turn. The run is checked again before and after. */
 async function reacquireSegment(planner, run) {
   const result = await run.segment.reacquire({ revalidate: () => runStillWanted(planner, run) });
   if (result?.ok === true) return true;
@@ -399,18 +402,19 @@ async function reacquireSegment(planner, run) {
   return false;
 }
 
-/** Record why execution was not taken: an abort, a run no longer wanted, or a refusal the GM is told about. */
+/** Record why the segment was not taken: an abort, a run no longer wanted, or a refusal the GM is told about. */
 function noteRefusal(planner, run, result, field) {
   if (abortWanted()) run.aborted = true;
   else if (!isEnabled(encounterOf(planner)) || !phaseStillCurrent(run)) run.standDown = true;
   else run[field] = String(result?.code ?? 'unknown');
 }
 
-/** Record which unit's turn a halt unwound, and whether the halt was an abort, here or requested by staff. */
+/** Record which unit's turn a stop interrupted, and whether it was an abort, from this client or asked for by a GM. */
 function noteHalt(run, unit, error) {
   run.haltedUnit ||= unit.name ?? '';
   if (error?.reason !== HALT_REASONS.ABORT) return;
   run.aborted = true;
+  // Called for its side effect: a stop asked for through the system also switches the AI off here.
   abortWanted();
 }
 
@@ -431,7 +435,7 @@ async function teardownPhase(planner, run) {
   }
 }
 
-/** Close the run's execution segment. By teardown, every action the run started has settled. */
+/** Close the run's execution segment. By teardown, every action the run started has finished. */
 async function closeSegment(run) {
   try {
     if (!await run.segment.close()) run.closeFailed = true;
@@ -453,7 +457,7 @@ async function camera(beat, tokenUuid = '') {
 /* -------------------------------------------- */
 /*  Where the run stands                        */
 /* -------------------------------------------- */
-/** Whether this client is still the command host, on the scene, encounter, phase and round where the run began. */
+/** Whether this client is still the host client, on the Scene, encounter, phase and round where the run began. */
 function phaseStillCurrent(run) {
   const state = encounterState(run.sceneUuid);
   return isCommandHost() && state?.started === true
@@ -470,7 +474,7 @@ function soleEncounterSceneUuid() {
 /* -------------------------------------------- */
 /*  Reporting                                   */
 /* -------------------------------------------- */
-/** Tell the GM what the run left behind: the abort, the stall, the casualties and the manual units. */
+/** Tell the GM what the run left behind: the abort, the stall, the units that failed and the manual units. */
 function reportPhase(planner, run) {
   const notify = globalThis.ui?.notifications;
   const halt = run.segment.halt;
@@ -515,7 +519,7 @@ function reportPhase(planner, run) {
   if (run.idled) console.debug(`${LOG} ${run.idled} unit(s) had nothing to do; turns ended without processing.`);
 }
 
-/** Why the system would not give the run world execution, in words the GM can act on. */
+/** Why the system refused the run its execution segment, in words the GM can act on. */
 function refusalReason(code) {
   const codes = systemResultCodes();
   if (code === codes.COMMAND_EXECUTION_BUSY) return 'other gameplay is still running';
@@ -525,7 +529,7 @@ function refusalReason(code) {
   return `the system refused (${code})`;
 }
 
-/** Manual units still holding the phase open, counted off the live board rather than tracked through the run. */
+/** How many Manual units still have a turn to take, counted on the map as it stands now. */
 function pendingManualCount(planner) {
   try {
     invalidateBoardMemo();
@@ -540,10 +544,9 @@ function pendingManualCount(planner) {
 /*  Picking an interrupted phase back up        */
 /* -------------------------------------------- */
 /**
- * Offer, once per host session and encounter and only after startup recovery, to pick an interrupted phase up.
- * `foundry/hooks.mjs` asks when the world is ready and when the canvas is drawn, and `openSegment` asks when the
- * host was still recovering. A phase this page ran itself was never interrupted by a reload, however its run ended,
- * so it is never offered. A run that stood down for startup recovery doesn't count as run.
+ * Once per host session and encounter, after the host has finished starting up, offer to resume an enemy phase a
+ * reload interrupted. Phases this page ran itself are never offered; a run that stopped because the system was still
+ * restoring an interrupted command doesn't count as run. Afterwards, release any board hold the reload left behind.
  */
 export function resumeAfterReload(planner) {
   if (!isCommandHost()) return Promise.resolve(false);
@@ -611,9 +614,8 @@ async function offerResume(planner, status) {
 }
 
 /**
- * The host's status once startup recovery and maintenance are done, or null if this client stops hosting first.
- * `protocol.status()`'s `lifecycle` field is the host's startup lifecycle, not a host-authority state, but the
- * system publishes no separate lifecycle map and its ready value is the same string as `protocol.hostStates.READY`.
+ * The host's status once it has finished starting up, or null if this client stops being the host first. The API has
+ * no list of startup states for `lifecycle`; its ready value is the same string as `protocol.hostStates.READY`.
  */
 async function awaitHostReady() {
   const { readinessPollMs, readinessTimeoutMs } = EXECUTION_TIMING;

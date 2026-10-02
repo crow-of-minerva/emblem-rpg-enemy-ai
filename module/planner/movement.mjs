@@ -31,7 +31,7 @@ export function canAttemptCrossing(planner, unit) {
 /*  Flight                                      */
 /* -------------------------------------------- */
 /**
- * Whether this unit should take to the air again: a stance break grounded it, and the system's board says the
+ * Whether this unit should take to the air again: a stance break grounded it, and the system reports that the
  * flight action would lift it now, its stance recovered, its action unspent and the map open to flight.
  */
 export function takesOffAgain(unit) {
@@ -45,9 +45,10 @@ function wieldedWeapon(unit) {
 }
 
 /**
- * What the best attack from a landing square would be worth next turn. A melee weapon skips a target the system's
- * airborneBeyondMelee says it cannot reach from the ground, and a target whose elevation differs from the landing
- * square's by more than 1.
+ * What the best attack after landing on a square would be worth next turn. The reach checks use the landing square: a
+ * melee weapon skips a target the system's airborneBeyondMelee says it cannot reach from the ground, and a target
+ * whose elevation differs from the landing square's by more than 1. With a shared `measured` map, each target and
+ * distance is measured once, from the first square asked about, and that result is reused for every other square.
  */
 function crossingFutureValue(planner, unit, landingX, landingY, risk = null,
   { targets = null, measured = null } = {}) {
@@ -77,7 +78,7 @@ function crossingFutureValue(planner, unit, landingX, landingY, risk = null,
     if (meleeOnly && Math.abs(landingElevation - elevationAt(planner, target.x, target.y, targetDims)) > 1) continue;
 
     // Next turn's attack square is unknown, so the attack is measured at the nearest distance within the weapon's
-    // range after a full move, from the landing square's elevation, as the melee check above assumes.
+    // range after a full move.
     const closest = Math.max(1, distance - movement);
     const engageDistance = Math.min(range.maxRange, Math.max(range.minRange, closest));
     const key = `${target.actorUuid}|${engageDistance}`;
@@ -231,11 +232,9 @@ export function planRetreat(planner, unit, { budget = null } = {}) {
 }
 
 /**
- * Wander: a uniformly random reachable square, deliberately unweighted, since any bias would read as intent.
- *
- * The draw comes from `unpredictableRoll` in `planner/profile.mjs`, which is fixed for the round and the unit. A turn
- * that is played again after a rollback wanders to the same square, and still looks random at the table.
- * `Math.random` would pick a different square each time.
+ * Wander: a uniformly random reachable square, deliberately unweighted, since any bias would read as intent. The draw
+ * is `unpredictableRoll`, fixed for the round and the unit, so a turn replayed after a rollback wanders to the same
+ * square.
  * @param {object} planner The Scene's planner.
  * @param {object} unit The wandering unit.
  * @param {object} [options]

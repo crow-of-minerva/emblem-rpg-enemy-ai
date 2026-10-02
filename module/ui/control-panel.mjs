@@ -44,7 +44,7 @@ function summaryDetail(entry) {
   return carries && entry.variable > 0 ? ` (${entry.variable})` : '';
 }
 
-/** Everything the Combat AI tray renders for one Actor, from the module's flags and the board's own facts. */
+/** Everything the Combat AI tab renders for one Actor, from the module's flags and the unit's data on the map. */
 function controlPanelContext(actor, options = {}) {
   const { activeTray = '', collapsed = new Set(), actorType = '', mvmtTotal = 0 } = options;
   const ai = readActorAi(actor);
@@ -112,8 +112,8 @@ function reportMissingAnchor(selector, template) {
 /*  Injection                                   */
 /* -------------------------------------------- */
 /**
- * Add the Combat AI tray to a rendered Actor Control Panel, for GMs only. The `renderActorControlPanel` hook in
- * `foundry/hooks.mjs` calls it on every render, and it removes its own earlier tab and pane first.
+ * Add the Combat AI tab to a rendered Actor Control Panel, for GMs only. It runs on every render and removes its own
+ * earlier tab and pane first.
  */
 export async function injectControlPanelTray(app, element) {
   const root = element ?? app?.element ?? null;
@@ -125,6 +125,7 @@ export async function injectControlPanelTray(app, element) {
   drawer.querySelector('[data-enemy-ai-pane]')?.remove();
   const state = stateOf(app);
   const actor = app.actor ?? null;
+  // Copying a spawn order updates the Actor, which re-renders the panel and runs this again.
   if (await adoptSpawnBehavior(actor)) return;
   const placed = boardUnitFor(actor);
   const context = controlPanelContext(actor, {
@@ -207,6 +208,7 @@ function bindGate(root, pane) {
 /*  Field wiring                                */
 /* -------------------------------------------- */
 function bindFields(app, pane, actor, mvmtTotal) {
+  // These change events also bubble to the system's panel form, which submits itself on every change.
   pane.addEventListener('change', event => {
     const field = event.target?.closest?.('[data-ai-field], [data-cond-field]');
     if (!field || !pane.contains(field)) return;

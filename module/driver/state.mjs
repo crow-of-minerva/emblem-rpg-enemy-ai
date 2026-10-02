@@ -11,16 +11,15 @@ import { isCommandHost } from '../foundry/system-bridge.mjs';
  * keybinding, and stays Space even when that keybinding is changed.
  */
 const ABORT_KEY = 'Space';
-/** The selector for the fields a keystroke belongs to rather than the board. */
+/** The selector for the fields a keystroke belongs to rather than the map. */
 const TEXT_FIELDS = 'input, textarea, select, [contenteditable="true"]';
 
 /**
- * Everything this page remembers about driving, in one place.
+ * Everything this page remembers about playing the enemy phase, in one place. None of it is saved; the stop mark a
+ * reloaded page reads is a flag on the Combat (`foundry/flags.mjs`).
  *
- * `driver/phase.mjs` owns every transition: it registers the run it starts, clears it in teardown, and records the
- * phase it stopped driving. `beginRun` and `endRun` bracket a run. `stoppedPhase`, `ranPhases` and `resumeOffered`
- * outlive it on purpose, because a page neither drives nor offers a phase it already gave up on, and never offers one
- * it ran itself. Nothing here is persisted: `foundry/flags.mjs` writes the stop mark a reloaded page reads.
+ * `beginRun` and `endRun` start and finish a run. `stoppedPhase`, `ranPhases` and `resumeOffered` outlive the run:
+ * this page never plays a phase it gave up on, and never offers to resume a phase it ran itself.
  */
 export const DRIVER = {
   /** The active phase run, or null while the driver is idle. */
@@ -31,7 +30,7 @@ export const DRIVER = {
   lastAbortKeyAt: 0,
   /** The live abort listener, while the AI holds the board. */
   abortKeyHandler: null,
-  /** Whether the AI holds the board, which a run hands back for every manual unit it reaches. */
+  /** Whether this page holds the system's board hold. Page memory only; the hold itself is a world setting. */
   holdingBoard: false,
   /** The phase a run stopped driving after an uncertain outcome. This page never drives that phase again. */
   stoppedPhase: '',
@@ -52,7 +51,7 @@ export function beginRun(run) {
   DRIVER.abortRequested = false;
 }
 
-/** Free the driver, whatever became of the run, and stop listening for the abort gesture. */
+/** Free the driver, whatever became of the run, and stop listening for the abort key. */
 export function endRun() {
   detachAbortKey();
   DRIVER.running = null;
@@ -70,8 +69,8 @@ export function drivesEncounter(combatUuid) {
 }
 
 /**
- * Ask the running phase to stop at its next safe boundary. An action already in flight finishes first. The mode flag
- * goes off with it, so nothing starts the phase again behind the stop.
+ * Ask the running phase to stop after its current action. The AI mode is switched off too, so nothing starts the
+ * phase again.
  */
 export function requestAbort() {
   if (!DRIVER.running || DRIVER.abortRequested) return;
@@ -85,8 +84,8 @@ export function requestAbort() {
 }
 
 /**
- * Whether the run has been asked to stop, by the abort gesture here or by staff through the system's stop request.
- * The first sight of a system stop request is handled exactly like the gesture.
+ * Whether the run has been asked to stop. A stop asked for by any GM through the system is treated like the
+ * double-Space abort.
  */
 export function abortWanted() {
   if (!DRIVER.abortRequested && DRIVER.running?.segment.stopRequested === true) requestAbort();
@@ -114,11 +113,12 @@ export function phaseWasRun(key) {
 }
 
 /* -------------------------------------------- */
-/*  The abort gesture                           */
+/*  The abort key                               */
 /* -------------------------------------------- */
 /**
- * Listen for the abort gesture while the AI holds the board, on the command host only. Space presses outside text
- * fields are swallowed while it listens.
+ * Listen for the double-Space abort while the AI holds the board, on the host client only. The listener runs in the
+ * capture phase and stops each Space press outside a text field, so Foundry's keybindings (the system's
+ * Select/Confirm is also Space) never see it while the AI plays.
  */
 export function attachAbortKey() {
   if (DRIVER.abortKeyHandler || !isCommandHost()) return;
@@ -139,7 +139,7 @@ export function attachAbortKey() {
   globalThis.document?.addEventListener?.('keydown', DRIVER.abortKeyHandler, true);
 }
 
-/** Stop listening, and forget any half-finished gesture. */
+/** Stop listening, and forget a first press still waiting for its second. */
 export function detachAbortKey() {
   if (!DRIVER.abortKeyHandler) return;
   globalThis.document?.removeEventListener?.('keydown', DRIVER.abortKeyHandler, true);

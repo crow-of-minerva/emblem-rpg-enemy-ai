@@ -83,7 +83,7 @@ export function directiveOf(planner, unit) {
   return resolveDirective(directiveFacts(unit), aiConditionContext(sceneUuid));
 }
 
-/** The facts an authored condition reads off a unit. */
+/** The values an authored condition reads off a unit. */
 export function directiveFacts(unit) {
   return {
     hp: unit.hp,

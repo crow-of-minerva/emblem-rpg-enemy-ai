@@ -18,7 +18,7 @@ export function collectUnits(planner) {
     .sort((a, b) => (a.sort - b.sort) || a.tokenId.localeCompare(b.tokenId));
 }
 
-/** Whether a unit is AI-driven, alive and on the board. A hidden token counts as staged, not present. */
+/** Whether a unit is AI-driven, alive and on the map. A hidden token counts as not yet on the map. */
 export function isEligibleUnit(unit) {
   if (!unit) return false;
   if (unit.hidden) return false;
@@ -64,7 +64,7 @@ export function areFriendly(myType, otherType) {
   return factionsFriendly(myType, otherType);
 }
 
-/** Every living, unhidden unit this one would treat as hostile (cached per board). */
+/** Every living, unhidden unit this one would treat as hostile (cached until the map changes). */
 export function hostileTokens(planner, unit) {
   return boardMemo(`hostiles|${unit.tokenId}`, () => {
     const seesThroughIllusions = resistsLure(unit);
@@ -118,7 +118,10 @@ function isSneaking(unit) {
   return unit?.sneaking === true;
 }
 
-/** Who this unit may attack, split into what it should go for and what it would settle for (cached per board). */
+/**
+ * Who this unit may attack, split into what it should go for and what it would settle for (cached until the map
+ * changes).
+ */
 export function targetTiers(planner, unit) {
   return boardMemo(`tiers|${unit.tokenId}`, () => buildTargetTiers(planner, unit));
 }
@@ -152,7 +155,7 @@ export function collectTargets(planner, unit) {
 
 /**
  * Who this unit would chase: its taunter when it has one, else units that aren't sneaking, else the sneaking ones.
- * A unit under Sanctuary is never chased. The system's board marks it `sanctuary`, and nothing may be aimed at it.
+ * A unit under Sanctuary is never chased. The system marks it `sanctuary`, and nothing may be aimed at it.
  */
 export function pursuableHostiles(planner, unit) {
   const hostiles = hostileTokens(planner, unit).filter(hostile => !hostile.sanctuary);
@@ -184,10 +187,10 @@ export function targetableTokens(planner, units) {
 /*  Loadout                                     */
 /* -------------------------------------------- */
 /**
- * A unit's weapons and items as the system judges them, each item joined to its AI parameters (cached per board).
- * Each range is the `{minRange, maxRange}` pair `combat.loadout` publishes. An item's range is null when the system
- * cannot read it, and the system then refuses to activate the item, so every item step skips it. A Self item is
- * used at no distance.
+ * A unit's weapons and items as the system judges them, each item joined to its AI parameters (cached until the map
+ * changes). Each range is the `{minRange, maxRange}` pair `combat.loadout` publishes. An item's range is null when
+ * the system cannot read it, and the system then refuses to activate the item, so every item step skips it. A Self
+ * item is used at no distance.
  */
 export function loadout(unit) {
   return boardMemo(`loadout|${unit.actorUuid}`, () => {
@@ -203,7 +206,7 @@ export function loadout(unit) {
   });
 }
 
-/** Every weapon this unit could actually swing (cached per board). */
+/** Every weapon this unit could actually swing (cached until the map changes). */
 export function usableWeapons(unit) {
   return boardMemo(`weapons|${unit.actorUuid}`, () => loadout(unit).weapons
     .filter(weapon => weapon.usable === true && weapon.range));

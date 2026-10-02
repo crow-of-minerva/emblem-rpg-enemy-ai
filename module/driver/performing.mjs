@@ -20,7 +20,7 @@ const END_TURN_DECISION = 'end-turn';
 /* -------------------------------------------- */
 /*  Movement execution                          */
 /* -------------------------------------------- */
-/** Whether the unit's document now stands on a destination, read off a freshly invalidated board. */
+/** Whether the unit's token now stands on the destination, read off the current map. */
 function hasArrived(unit, destination) {
   const fresh = unitByTokenUuid(unit.tokenUuid);
   if (!fresh || !destination) return false;
@@ -28,13 +28,14 @@ function hasArrived(unit, destination) {
 }
 
 /**
- * Walk and hop a unit to a destination, settling the plan the way the caller asked. Each walked run goes to the
- * system's own drive through the run's execution segment (`driver/segment.mjs`), which re-judges the route itself.
+ * Walk a unit to a destination, teleporting where the route uses paired pads, and leave its movement plan the way the
+ * caller asked. Each walked stretch goes to the system's own drive command, which checks the route again itself.
  * @param {object} planner The Scene's planner, which owns the teleport pads a route may use.
- * @param {object} unit The unit as the board last showed it.
+ * @param {object} unit The unit as last read from the map.
  * @param {object} destination The square the plan wants.
  * @param {object} graph The movement graph the plan was made on.
- * @param {object} [options] `path` overrides the route, `then` settles the plan, `actions` is the segment's gameplay.
+ * @param {object} [options] `path` overrides the route, `then` is what the drive does with the plan afterwards,
+ *   `actions` is the segment's gameplay.
  * @returns {Promise<boolean>} Whether the unit's document ended up on the destination.
  */
 export async function moveTo(planner, unit, destination, graph, {
@@ -61,7 +62,7 @@ export async function moveTo(planner, unit, destination, graph, {
   return hasArrived(unit, destination);
 }
 
-/** Open a movement plan for an action to settle from. The system's drive leaves a plan that is already open alone. */
+/** Open a movement plan for the action that follows. The system's drive leaves an already open plan alone. */
 async function openPlan(unit, actions = NO_EXECUTION) {
   return driveCells(unit, [], 'plan', actions);
 }
@@ -115,12 +116,12 @@ function squareShared(unit) {
   return footprintOccupiedIn(occupiedCells(unit), unit, unit.x, unit.y);
 }
 
-/** The acting unit behind a plan, re-read off the current board. */
+/** The acting unit behind a plan, re-read off the current map. */
 function actingUnit(plan) {
   return unitByTokenUuid(plan.unit?.tokenUuid ?? plan.tokenUuid ?? '');
 }
 
-/** The unit a plan is aimed at, re-read off the current board. */
+/** The unit a plan is aimed at, re-read off the current map. */
 function planTarget(plan) {
   return unitByTokenUuid((plan.target ?? plan.targetToken)?.tokenUuid ?? '');
 }
@@ -137,7 +138,7 @@ async function answerContinuation(unit, continuation, actions = NO_EXECUTION) {
   return result?.ok === true;
 }
 
-/** Carry out a planned attack, everything the plan assumed re-verified on the board as it now stands. */
+/** Carry out a planned attack, everything the plan assumed re-verified on the map as it now stands. */
 export async function attack(plan, actions = NO_EXECUTION) {
   const unit = actingUnit(plan);
   const target = planTarget(plan);

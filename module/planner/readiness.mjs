@@ -21,8 +21,8 @@ export function isHeldByStatus(unit) {
 
 /**
  * Whether a status forces this unit to spend its own turn fleeing: it is feared, and no other status holds it in place
- * outright. `planner/phase-roster.mjs` gives such a unit its turn and `driver/turn.mjs` spends it on a retreat. Every
- * other reader still counts it held through {@link isHeldByStatus}.
+ * outright. Such a unit still gets its turn and spends it retreating; everywhere else it counts as held through
+ * {@link isHeldByStatus}.
  */
 export function fleesByStatus(unit) {
   const statuses = statusKeysOf(unit);

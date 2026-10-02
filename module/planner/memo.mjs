@@ -3,7 +3,7 @@
 /* -------------------------------------------- */
 /*  Board memo                                  */
 /* -------------------------------------------- */
-/** The document hooks after which nothing in the memo can be trusted. */
+/** Hooks after which the cached answers about the map are thrown away. */
 export const BOARD_MEMO_HOOKS = Object.freeze([
   'createToken', 'updateToken', 'deleteToken',
   'createActor', 'updateActor', 'deleteActor',
@@ -17,13 +17,13 @@ export const BOARD_MEMO_HOOKS = Object.freeze([
 const store = new Map();
 let epoch = 0;
 
-/** Forget everything the planner remembered about the board. */
+/** Forget everything the planner remembered about the map. */
 export function invalidateBoardMemo() {
   store.clear();
   epoch += 1;
 }
 
-/** How often the memo has been emptied. A plan spread over several frames compares it to learn the board moved. */
+/** How often the memo has been emptied. A plan spread over several frames compares it to learn the map changed. */
 export function boardEpoch() {
   return epoch;
 }

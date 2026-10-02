@@ -50,6 +50,7 @@ import { cellKey, footprintOccupiedIn, parseCellKey, standingDistance } from './
 /**
  * Decide what this unit does with its action: an attack, a heal, an approach, or null for nothing. `driver/turn.mjs`
  * carries out the plan this returns, and `ui/threat-intent.mjs` runs the same planning through `planTurnSteps`.
+ * This version runs in one go, so the host client's page is unresponsive until the plan is done.
  */
 export function planTurn(planner, unit, risk, options = {}) {
   return drain(planTurnSteps(planner, unit, risk, options));
@@ -252,8 +253,9 @@ function* anchorPropertiesSteps(planner, unit, graph, anchors, riskProfile, move
 }
 
 /**
- * What a square's terrain contributes to the measurement key. The planner doesn't price an airborne unit's terrain,
- * but the system still applies it when measuring from the square, so such squares never share a measurement.
+ * What a square's terrain contributes to the measurement key. The planner passes no terrain for an airborne unit, so
+ * the system reads the square's terrain itself when measuring, and each such square gets its own key. The live rules
+ * give an airborne unit no terrain bonus, so those measurements overrate it.
  */
 function terrainSignature(terrain, hasTerrain, anchorX, anchorY) {
   if (terrain) return `${terrain.eva},${terrain.def},${terrain.res}`;
@@ -365,7 +367,11 @@ export function woundedFriendlies(planner, unit) {
   });
 }
 
-/** Whether a heal could reach an ally from this square, by the item's line-of-sight rule, and at what distance. */
+/**
+ * Whether a heal could reach an ally from this square, by the item's line-of-sight rule, and at what distance. Range
+ * is counted in straight grid steps; a Square range's diagonal reach and the height limit on range-1 items are not
+ * checked.
+ */
 function healEngagement(unit, anchorX, anchorY, ally, range, losRule = 'normal') {
   if (ally.tokenUuid === unit.tokenUuid) return range.minRange <= 0 ? 0 : null;
   const dims = { width: unit.width, height: unit.height };

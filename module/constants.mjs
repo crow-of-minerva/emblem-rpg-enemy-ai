@@ -35,17 +35,20 @@ export const SYSTEM_SPAWN_BEHAVIOR_FLAG = 'spawnBehavior';
 /* -------------------------------------------- */
 /*  System execution                            */
 /* -------------------------------------------- */
-/** The label the AI's execution segment carries. */
+/** The name the AI's run is opened under when it asks the system for exclusive use of its commands. */
 export const EXECUTION_SEGMENT_LABEL = 'Enemy Phase';
 /**
- * The attribute that lets a staff control through the system's processing guard while the world is busy. The
- * tracker's AI switch carries it, so a GM can ask a running segment to stop.
+ * Marks a GM-only control that still works while the system is busy. The tracker's AI switch carries it, so the GM
+ * can stop a running enemy phase.
  */
 export const PROCESSING_CONTROL = Object.freeze({
   ATTRIBUTE: 'data-emblem-processing-control',
   SEGMENT_STOP: 'segment-stop'
 });
-/** How long a run waits for world execution, and a resume check for the host to finish startup recovery. */
+/**
+ * How long a run keeps asking while the system is busy with other commands, and how long a resume check waits for the
+ * host client to finish starting up.
+ */
 export const EXECUTION_TIMING = Object.freeze({
   acquirePollMs: 400,
   acquireTimeoutMs: 30000,
@@ -84,7 +87,7 @@ export const AI_PROFILES = Object.freeze([
 ]);
 export const AI_PROFILE_VALUES = Object.freeze(AI_PROFILES.map(profile => profile.value));
 /**
- * Tooltip text for the profile picker's help icon in the Actor Control Panel tray. Each entry sums up how the AI
+ * Tooltip text for the profile picker's help icon in the Actor Control Panel. Each entry sums up how the AI
  * plays that profile: its weights in RISK_PROFILES, its place in PROFILE_TURN_ORDER and `retreatsWhenBroken`.
  */
 export const AI_PROFILE_DESCRIPTIONS = Object.freeze({
@@ -219,7 +222,7 @@ export const ABORT_DOUBLE_PRESS_MS = 300;
 export const SETTLE_STABLE_MS = 400;
 export const SETTLE_TIMEOUT_MS = 120000;
 export const SETTLE_POLL_MS = 200;
-/** Turn order within the phase, by profile. Support goes last so its heals land after the fighting. */
+/** Turn order within the phase, by profile. It only breaks ties after priority and break/debuff weapons. */
 export const PROFILE_TURN_ORDER = Object.freeze({
   berserk: 0, aggressive: 0, balanced: 1, defensive: 2, cautious: 2, support: 3, passive: 3
 });
@@ -230,26 +233,45 @@ export const PROFILE_ORDER_SPAN = 3;
 /* -------------------------------------------- */
 /** The score currency: one point is roughly one percent of the relevant unit's maximum health. */
 export const SCORE_SCALE = 100;
+/** Points added to a heal on a critically wounded ally. */
 export const CRITICAL_HEAL_BONUS = 25;
+/** A certain kill's worth, in multiples of the target's max HP, scaled by kill chance and the profile. */
 export const LETHAL_BONUS = 10;
+/** The extra share of a blow's worth when the target can't counter. */
 export const UNANSWERED_FACTOR = 0.25;
+/** The cost of an attack whose expected counter would kill the attacker, in multiples of its max HP. */
 export const SUICIDE_PENALTY = 5;
+/** Expected HP damage below which an attack isn't worth making. */
 export const MIN_MEANINGFUL_DAMAGE = 0.5;
+/** Scores closer than this count as a tie. */
 export const SCORE_EPSILON = 0.001;
+/** A stance break's worth, as a share of the target's max HP. */
 export const BREAK_BONUS = 0.35;
+/** The worth of wearing a stance down short of breaking it, as a share of max HP at full progress. */
 export const BREAK_PROGRESS_WEIGHT = 0.15;
+/** How much more or less a wall breach is worth when the wall is vulnerable to, or resists, the damage type. */
 export const BREACH_VULNERABLE_BIAS = 1.2;
 export const BREACH_PROTECTED_BIAS = 0.5;
+/** Points for attacking whatever blocks a Seize unit's route, at full value when removing it opens the route. */
 export const SEIZE_BLOCKER_BONUS = 60;
+/** Turns of movement a removed blocker must save to count at full value. */
 export const SEIZE_UNLOCK_TURNS = 3;
+/** Points for a turn's attacks that would break a blocking wall outright, less for partial damage. */
 export const SEIZE_BREACH_PROGRESS = 40;
+/** Turns a Seize unit expects to spend removing a blocking unit. */
 export const SEIZE_BLOCKADE_TURN_COST = 2;
+/** The kill chance, or share of the target's max HP dealt, that makes an attack worth a Seize unit pausing for. */
 export const SEIZE_DETOUR_KILL_CHANCE = 0.5;
 export const SEIZE_DETOUR_DAMAGE_FRACTION = 0.25;
+/** What an on-hit debuff adds to a unit's break damage when ordering the phase. */
 export const DEBUFF_SETUP_VALUE = 2;
+/** Points lost for each hostile whose weapon covers the square, scaled by the profile. */
 export const POSITION_EXPOSURE_PENALTY = 4;
+/** Points gained for each point of terrain evasion, defense and resistance on the square, scaled by the profile. */
 export const POSITION_COVER_UNIT = 0.75;
+/** Points gained for flanking the target, scaled by the profile. */
 export const POSITION_FLANK_BONUS = 8;
+/** Points lost for each square of movement spent, scaled by the profile's wish to hold its ground. */
 export const POSITION_HOLD_GROUND = 1;
 
 /* -------------------------------------------- */
@@ -320,6 +342,10 @@ export const ORTHOGONAL_STEPS = Object.freeze([[0, -1], [1, 0], [0, 1], [-1, 0]]
 /* -------------------------------------------- */
 /*  Pursuit weights                             */
 /* -------------------------------------------- */
+/**
+ * How far Pursue, Seize and the approach to a blocked target search: a movement cost of the larger of 40 squares and
+ * ten turns of movement. A goal beyond it is treated as unreachable.
+ */
 export const PURSUIT_HORIZON_SQUARES = 40;
 export const PURSUIT_HORIZON_TURNS = 10;
 export const PURSUIT_TRANSIT_THREAT = 0.6;

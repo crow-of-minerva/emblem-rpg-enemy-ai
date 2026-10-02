@@ -63,15 +63,14 @@ function standsOnDefendPoint(planner, unit) {
 /*  Obstruction                                 */
 /* -------------------------------------------- */
 /**
- * Whether one unit can move through another, by the pathfinder's own rule, so the answer agrees with the graph.
+ * Whether one unit can move through another, used to name the units in a Seize unit's way. Based on the system's
+ * `resolveMovementOccupancy`, which the API applies only inside `movement.getField` and offers no per-pair query for.
  *
- * This copies the pass-through half of `resolveMovementOccupancy` in the system's `game/movement/pathfinding.mjs`.
- * `movement.getField` applies that rule only to the one unit it paths, and the API has no per-pair query, so
- * `blockingTokens`, which must name the unit in the way to weigh forcing a blockade against a detour, asks this copy.
- * Whether the other unit takes its square at all is the system's own answer, the board's `occupiesLanding`: a Convoy,
- * a fixture Object, an unlocked Door and a felled wall take none, so they are walked through. Anything else but a wall,
- * a locked Door included, is passed when one of the two is aloft and the other isn't, or when they are friendly by the
- * system's `character.factions.friendly`, so an unknown faction blocks.
+ * A `passing` unit passes everything. Otherwise a unit passes anything `passable` or that takes no square
+ * (`occupiesLanding` false), a broken wall, and a standing wall when it flies and the wall doesn't stop fliers.
+ * Anything else, a locked Door or other Object included, is passed when exactly one of the two is airborne or when
+ * their factions are friendly; an unknown faction blocks. The system now stops every unit at a locked Door and never
+ * lets faction pass an Object, so this copy is out of date.
  */
 function canTokensPassThrough(unit, other) {
   if (unit.passing === true) return true;
@@ -117,7 +116,10 @@ function committedBlockers(planner, unit) {
   return uuids;
 }
 
-/** Whether this unit shares a square with another, which denies it an action. */
+/**
+ * Whether any other unit's footprint overlaps this one's. Standing on a unit that takes up the square denies an
+ * action; this check also counts units that don't, such as a Chest or an unlocked Door.
+ */
 function sharesSquare(planner, unit) {
   return boardMemo(`shares|${unit.tokenId}`, () => {
     const mine = new Set(unitCellKeys(unit));
@@ -198,8 +200,8 @@ function breachOption(unit, blocker, weapon, distance, standing = null) {
 }
 
 /**
- * Every way this unit could break a wall, best first (cached per board). With no square chosen yet, each weapon is
- * asked at its closest usable range from the square the unit stands on.
+ * Every way this unit could break a wall, best first (cached until the map changes). With no square chosen yet, each
+ * weapon is asked at its closest usable range from the square the unit stands on.
  */
 function breachOptions(unit, blocker) {
   return boardMemo(`breach|${unit.tokenId}|${blocker.tokenId ?? '-'}`, () => buildBreachOptions(unit, blocker));
@@ -384,7 +386,10 @@ function blockadeBeatsDetour(unit, blockage, standingRoute) {
   return blockage.openGoal.route + (turns * movement) < standingRoute;
 }
 
-/** Get into position on whoever is holding the doorway, backing off to a firing position where that is the way. */
+/**
+ * Move into attack range of the unit or wall blocking the route, or hold if already there. Records the chosen blocker
+ * in the Scene's `seizeBlockers` memory, even when called only to test a plan.
+ */
 function planBlockadeApproach(planner, unit, blockage, field, threat, risk, budget, holders) {
   const startKey = cellKey(unit.x, unit.y);
   for (const blocker of blockage.candidates) {
@@ -432,7 +437,10 @@ function nearestRingGoal(field, ring) {
 /* -------------------------------------------- */
 /*  Seize                                       */
 /* -------------------------------------------- */
-/** A move that ends this turn on a Defense Point, or null. A capture beats anything else the unit could do. */
+/**
+ * A move that ends this turn on a Defense Point, or null. A capture beats anything else the unit could do. The cost
+ * checked is the threat-avoiding route's, so a point reachable this turn only through threat is not taken.
+ */
 function planSeizeCapture(unit, points, field, budget, freeCells = null) {
   const allowance = unit.turn?.movementAvailable === false ? 0 : (Number(unit.movement) || 0);
   const cap = budget === null ? allowance : Math.min(budget, allowance);
@@ -459,9 +467,9 @@ function planSeizeCapture(unit, points, field, budget, freeCells = null) {
 }
 
 /**
- * Drive for the nearest Defense Point: arrive if possible, force the doorway if it pays, otherwise close in.
- * `driver/turn.mjs` runs it for a Seize directive, and `planner/phase-roster.mjs` runs it to decide whether a unit
- * should wait for an ally.
+ * Drive for the nearest Defense Point: arrive if possible, break through a blocker if that beats walking round,
+ * otherwise close in. Runs for a Seize directive, and also to decide whether a unit should wait for an ally.
+ * Returns null, and the unit does nothing, when no route to a Defense Point is found within the search range.
  */
 export function planSeize(planner, unit, { budget = null, riskProfile = null, freeCells = null } = {}) {
   const points = defendPoints(planner);

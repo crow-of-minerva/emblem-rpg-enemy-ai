@@ -10,7 +10,7 @@
   inherits: false;
 }
 
-/* The switch is one of the rebuild's own .ect-btn-toggle .ect-btn-wide buttons, so its metrics, casing and quiet
+/* The switch is one of the system's own .ect-btn-toggle .ect-btn-wide buttons, so its metrics, casing and quiet
    colour all come from play-surfaces.css. Only the armed colours and the orbit belong to this module. */
 .ect-toggles .ect-btn-ai.is-on,
 .ect-toggles .ect-btn-ai.is-locked {
@@ -68,10 +68,10 @@
 }
 
 /* -------------------------------------------- */
-/*  Combat AI tray                              */
+/*  Combat AI tab                               */
 /* -------------------------------------------- */
 
-/* Every other rule the tray needs already ships in the rebuild's tools.css. The gate note is the one addition:
+/* Every other rule the tab needs already ships in the system's tools.css. The gate note is the one addition:
    it stays in the DOM so the Faction tab's Actor Type select can show and hide it live. */
 .acp-ai-pane .acp-empty-note[hidden] {
   display: none;
@@ -162,9 +162,9 @@
 
 .application.dialog.emblem-ai-overwrite .window-content { overflow-y: auto !important; }
 
-/* The dialog borrows the Combat AI tray's own .acp-cond-* markup, but the rebuild declares that palette on
+/* The dialog borrows the Combat AI tab's own .acp-cond-* markup, but the system declares that palette on
    .emblem-actor-control-panel and scopes .ed-container to .dialog-editor, so both are carried here instead. The row
-   labels are left to the rebuild's unscoped `.acp-field .ed-label`. */
+   labels are left to the system's unscoped `.acp-field .ed-label`. */
 .emblem-aiset {
   --acp-card: #221d31;
   --acp-ctrl: #282237;

@@ -8,14 +8,14 @@ export const ABANDONED = Symbol('abandoned');
 
 /** How long a page that never goes idle may starve the work before it is given one step anyway. */
 const IDLE_TIMEOUT_MS = 60;
-/** The slice a host without `requestIdleCallback` gets per timer turn. */
+/** The slice a browser without `requestIdleCallback` gets per timer turn. */
 const FALLBACK_SLICE_MS = 6;
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 /**
  * Wait for the page's next idle period and report how much of it is left. The browser knows when the canvas frame
- * is done and how long until the next one. A host without `requestIdleCallback` gets a timer turn and a fixed slice.
+ * is done and how long until the next one. A browser without `requestIdleCallback` gets a timer turn and a fixed slice.
  * @returns {Promise<function(): number>} Milliseconds of idle time remaining, asked as often as the caller likes.
  */
 function nextIdlePeriod() {
