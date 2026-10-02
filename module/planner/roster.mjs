@@ -78,9 +78,9 @@ export function hostileTokens(planner, unit) {
   });
 }
 
-/** Whether a unit is an illusion planted to draw attention. */
+/** Whether a unit is a decoy planted to draw attention: a token spawned from an Actor marked as a lure. */
 export function isLure(unit) {
-  return Boolean(unit?.illusionCasterUuid);
+  return unit?.lure === true;
 }
 
 /** Whether a unit sees through illusions: bosses always, and anyone sharp enough. */
@@ -101,7 +101,7 @@ function lureTokens(planner, unit) {
   for (const candidate of units) {
     if (candidate.tokenUuid === unit.tokenUuid || !isLure(candidate)) continue;
     if (!isAlive(candidate) || candidate.sanctuary) continue;
-    const caster = units.find(other => other.actorUuid === candidate.illusionCasterUuid) ?? null;
+    const caster = units.find(other => other.actorUuid === candidate.summonedBy) ?? null;
     if (caster) {
       if (!isHostileTo(unit.factionRole, caster.factionRole)) continue;
     } else if (areFriendly(unit.factionRole, candidate.factionRole)) {
