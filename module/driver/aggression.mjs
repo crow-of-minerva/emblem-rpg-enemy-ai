@@ -1,8 +1,13 @@
 /** @layer driver */
-import { AI_PROFILE_FACTIONS, LOG } from '../constants.mjs';
-import { documentByUuid, readActorAi, sceneUuidOfToken, writeActorAi } from '../foundry/flags.mjs';
-import { factionsFriendly, unitBoard } from '../foundry/system-bridge.mjs';
-import { invalidateBoardMemo } from '../planner/memo.mjs';
+/*
+ * The Aggressed mark that an Aggressed condition reads, set on a unit of a faction the AI plays when a unit not
+ * friendly to it attacks it or uses an item on it, and cleared when its turn or its battle ends. The marks are written
+ * from the system's committed events, which only the host client receives.
+ */
+import { LOG } from '../constants.mjs';
+import { documentByUuid, sceneUuidOfToken, worldActors } from '../foundry/documents.mjs';
+import { readActorAi, writeActorAi } from '../foundry/flags.mjs';
+import { factionsFriendly, isAiFaction, unitBoard } from '../foundry/system-bridge.mjs';
 import { delay } from './pacing.mjs';
 
 /** How long `awaitMarkWrites` holds the driver for mark writes still running before it plans without them. */
@@ -24,9 +29,9 @@ function isAggression(sourceRole, targetRole) {
   return !factionsFriendly(sourceRole, targetRole);
 }
 
-/** Whether marking this pair would change anything: only driven factions are marked, and only once. */
+/** Whether marking this pair would change anything: only the factions the AI plays are marked, and only once. */
 function marksAggression(sourceRole, targetRole, targetAlreadyMarked) {
-  if (!AI_PROFILE_FACTIONS.includes(targetRole)) return false;
+  if (!isAiFaction(targetRole)) return false;
   if (targetAlreadyMarked === true) return false;
   return isAggression(sourceRole, targetRole);
 }
@@ -34,20 +39,28 @@ function marksAggression(sourceRole, targetRole, targetAlreadyMarked) {
 /* -------------------------------------------- */
 /*  Writing                                     */
 /* -------------------------------------------- */
-async function write(actors, value) {
+/** Write the same AI flag changes on several Actors. A failed update is logged and counts as nothing written. */
+async function write(actors, changes) {
   try {
-    await Promise.all(actors.map(actor => writeActorAi(actor, { wasAggressed: value })));
+    await Promise.all(actors.map(actor => writeActorAi(actor, changes)));
     return actors.length;
   } catch (error) {
-    console.error(`${'emblem-rpg-enemy-ai'} | could not record an aggression mark.`, error);
+    console.error(`${LOG} could not save a unit's Enemy AI flags.`, error);
     return 0;
   }
 }
 
-/** Mark the units a committed action came at, given the acting Actor and the Actors acted on. */
-async function markAggressedMany(sourceActor, targetActors, sceneUuid = '') {
+/**
+ * Mark the units a committed action came at. Each mark records the Scene it was set on.
+ * @param {{factionRole?: string, actorUuid?: string}} source The acting unit: the faction role its event carries, or
+ *   its actor uuid to look the role up on the map.
+ * @param {object[]} targetActors The Actors acted on.
+ * @param {string} sceneUuid The Scene the action happened on.
+ * @returns {Promise<number>} How many Actors were marked.
+ */
+async function markAggressedMany(source, targetActors, sceneUuid = '') {
   const roles = factionRoles(sceneUuid);
-  const sourceRole = roles.get(sourceActor.uuid) ?? '';
+  const sourceRole = source.factionRole ?? roles.get(source.actorUuid) ?? '';
   const targets = new Map();
   for (const actor of targetActors) {
     if (!actor.uuid) continue;
@@ -56,24 +69,31 @@ async function markAggressedMany(sourceActor, targetActors, sceneUuid = '') {
     targets.set(actor.uuid, actor);
   }
   if (targets.size === 0) return 0;
-  return write([...targets.values()], true);
+  return write([...targets.values()], { wasAggressed: true, markScene: sceneUuid });
 }
 
-/** Clear one unit's aggression mark. `endTurn` in `driver/turn.mjs` calls this as the unit's turn ends. */
+/** Clear one unit's aggression mark, once its turn has ended. */
 export async function clearAggressed(actor) {
   if (!actor || readActorAi(actor).wasAggressed !== true) return false;
-  return await write([actor], false) > 0;
+  return await write([actor], { wasAggressed: false }) > 0;
 }
 
-/** Wipe one Scene's marks when its battle ends. */
-async function clearAllAggression(scene) {
+/**
+ * Wipe one Scene's aggression marks and profile switches when its battle ends, so each unit goes back to the profile
+ * the GM chose. That covers the units still on the Scene and every world Actor marked there, such as a linked unit
+ * that fell or was removed during the battle.
+ */
+async function clearBattleMarks(sceneUuid) {
+  const onScene = (documentByUuid(sceneUuid)?.tokens ?? []).map(token => token?.actor);
+  const leftScene = sceneUuid ? worldActors().filter(actor => readActorAi(actor).markScene === sceneUuid) : [];
   const marked = new Map();
-  for (const token of scene?.tokens ?? []) {
-    const actor = token?.actor;
-    if (actor?.uuid && readActorAi(actor).wasAggressed === true) marked.set(actor.uuid, actor);
+  for (const actor of [...onScene, ...leftScene]) {
+    if (!actor?.uuid) continue;
+    const ai = readActorAi(actor);
+    if (ai.wasAggressed === true || ai.switchedProfile) marked.set(actor.uuid, actor);
   }
   if (marked.size === 0) return 0;
-  return write([...marked.values()], false);
+  return write([...marked.values()], { wasAggressed: false, switchedProfile: '', markScene: '' });
 }
 
 /* -------------------------------------------- */
@@ -81,13 +101,14 @@ async function clearAllAggression(scene) {
 /* -------------------------------------------- */
 /**
  * On a committed combat exchange, mark the defender. The attacker is not marked for the counter it took, since a
- * counter answers an attack rather than starting one.
+ * counter answers an attack rather than starting one. The attacker's faction comes from the event, because an
+ * attacker the counter killed has had its token removed by the time the event arrives.
  */
 export function onExchangeCommitted(event) {
   const data = event?.data ?? {};
-  const source = documentByUuid(data.sourceActorUuid);
   const target = documentByUuid(data.targetActorUuid);
-  if (!source || !target) return Promise.resolve(0);
+  if (!target) return Promise.resolve(0);
+  const source = { factionRole: String(data.sourceFactionRole ?? '') };
   return inFlight(markAggressedMany(source, [target], eventSceneUuid(data)));
 }
 
@@ -99,13 +120,12 @@ export function onActivationCommitted(event) {
   const targets = (data.deliveries ?? [])
     .map(delivery => documentByUuid(delivery?.targetActorUuid))
     .filter(actor => actor && actor.uuid !== source.uuid);
-  return inFlight(markAggressedMany(source, targets, eventSceneUuid(data)));
+  return inFlight(markAggressedMany({ actorUuid: source.uuid }, targets, eventSceneUuid(data)));
 }
 
-/** When an encounter ends, clear the aggression marks on its Scene. */
+/** When an encounter ends, clear the aggression marks and profile switches its battle left. */
 export function onEncounterEnded(event) {
-  const scene = documentByUuid(event?.data?.sceneUuid);
-  return inFlight(clearAllAggression(scene));
+  return inFlight(clearBattleMarks(String(event?.data?.sceneUuid ?? '')));
 }
 
 /** The Scene a committed action happened on: the one its event names, else the acting Token's own. */
@@ -124,10 +144,9 @@ function factionRoles(sceneUuid) {
 /*  Writes in flight                            */
 /* -------------------------------------------- */
 /**
- * Wait until every mark write the event handlers started has finished, or the time limit passes. The driver waits
- * here before it reads the units and before each turn, so plans see the latest marks. Writes still running at the
- * limit are forgotten, so a stuck write delays the run once rather than once per unit. The cached map data is cleared
- * afterwards.
+ * Wait until every mark write the event handlers started has finished, or the time limit passes, so plans see the
+ * latest marks. Writes still running at the limit are forgotten, so a stuck write delays the run once rather than
+ * once per unit.
  * @returns {Promise<boolean>} False when the limit passed with a write still running.
  */
 export async function awaitMarkWrites() {
@@ -135,7 +154,6 @@ export async function awaitMarkWrites() {
   let expired = false;
   const bound = delay(MARK_WRITE_TIMEOUT_MS).then(() => { expired = true; });
   while (writesInFlight.size && !expired) await Promise.race([Promise.all(writesInFlight), bound]);
-  invalidateBoardMemo();
   if (!expired) return true;
   console.warn(`${LOG} planning on while ${writesInFlight.size} aggression mark write(s) have not finished.`);
   writesInFlight.clear();
@@ -143,8 +161,8 @@ export async function awaitMarkWrites() {
 }
 
 /**
- * Keep one handler's write in `writesInFlight` until it finishes. `write` logs a failed Actor update itself. Anything
- * else that fails on the way is logged here, since the hook that called the handler drops its promise.
+ * Keep one handler's write in `writesInFlight` until it finishes. A failure `write` has not logged already is logged
+ * here, since the hook that called the handler drops its promise.
  */
 function inFlight(work) {
   const flight = Promise.resolve(work)

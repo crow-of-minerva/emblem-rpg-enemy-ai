@@ -1,0 +1,292 @@
+/* The two places a GM edits a unit's Combat AI: the Combat AI tab in the Actor Control Panel, and the Set Combat AI
+   on Selected window. module.json loads this file into the system's cascade layer, not the modules layer, so these
+   rules rank against the system's own Actor Control Panel rules by specificity, as if they were written at the end
+   of the system stylesheet. Each rule is scoped to the tab's pane ([data-enemy-ai-pane]), the window's body
+   (.emblem-aiset) or the window itself (.emblem-ai-overwrite), so none styles the system's own markup. The rules
+   both share are scoped with :where(), which adds no specificity, so they rank as they would unscoped. */
+
+/* -------------------------------------------- */
+/*  Colours                                     */
+/* -------------------------------------------- */
+
+/* The Actor Control Panel's colours. The system declares them as --acp-* on .emblem-actor-control-panel only, under
+   "Actor Control Panel: colours and window" in its styles/emblem-rpg.css. The tab sits inside that panel and takes
+   the system's values. The window is not inside it, so it takes the copy after each comma, which must be kept equal
+   to the system's value. */
+:where([data-enemy-ai-pane], .emblem-aiset) {
+  --enemy-ai-card: var(--acp-card, #221d31);
+  --enemy-ai-card-fx: var(--acp-card-fx, inset 0 1px 0 rgba(255, 255, 255, 0.03));
+  --enemy-ai-text: var(--acp-tx, #ded9e2);
+  --enemy-ai-muted: var(--acp-mu, #837c92);
+  --enemy-ai-gold: var(--acp-gold, #d8b36a);
+  --enemy-ai-gold-bright: var(--acp-gold-bright, #eccf90);
+  --enemy-ai-danger: var(--acp-danger, #b5766c);
+}
+
+/* -------------------------------------------- */
+/*  Rows of side-by-side fields                 */
+/* -------------------------------------------- */
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-row-split {
+  align-items: flex-start;
+  gap: 8px;
+  padding-bottom: 0;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-row-split > .acp-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-row-split > .acp-field[hidden] {
+  display: none;
+}
+
+/* -------------------------------------------- */
+/*  Help dots and conditions                    */
+/* -------------------------------------------- */
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-help-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  margin-left: 5px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--enemy-ai-muted);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: var(--cursor-help);
+  vertical-align: middle;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-help-dot:hover {
+  color: var(--enemy-ai-gold-bright);
+  background: rgba(216, 179, 106, 0.16);
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* The small Add Entry button in the Combat AI tab and the Set Combat AI window. The second selector outranks
+   `.acp-left .acp-btn`. */
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-btn-mini,
+.acp-left :where([data-enemy-ai-pane]) .acp-btn.acp-btn-mini {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  min-height: 18px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  font-size: 9px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-list {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-entry {
+  border: none;
+  border-radius: 4px;
+  background: var(--enemy-ai-card);
+  box-shadow: var(--enemy-ai-card-fx);
+  overflow: hidden;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 7px;
+  cursor: var(--cursor-pointer);
+  background: transparent;
+  user-select: none;
+  min-height: 22px;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-header:hover { background: rgba(255, 255, 255, 0.025); }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-chevron {
+  font-size: 8px;
+  flex: 0 0 auto;
+  color: var(--enemy-ai-muted);
+  transform: rotate(-90deg);
+  transition: transform 100ms ease;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-entry.is-open .acp-cond-chevron { transform: rotate(0deg); }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--enemy-ai-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-delete {
+  flex: 0 0 auto;
+  background: transparent;
+  box-shadow: none;
+  color: var(--enemy-ai-danger);
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-body {
+  display: none;
+  flex-direction: column;
+  gap: 7px;
+  padding: 7px 8px 9px;
+  box-shadow: inset 0 1px 0 rgba(0, 0, 0, 0.3);
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-entry.is-open .acp-cond-body { display: flex; }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-note {
+  margin: 0;
+  font-size: 9px;
+  line-height: 1.45;
+  color: var(--enemy-ai-gold);
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-note i { margin-top: 1px; }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-profile[hidden],
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-variable[hidden],
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-num[hidden],
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-ai-controls[hidden] { display: none; }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-row-split > .acp-ai-priority { flex: 0 0 76px; }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-ai-conditions.is-disabled {
+  opacity: 0.45;
+  filter: saturate(0.3);
+}
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-cond-variable input[type="number"] { max-width: 90px; }
+
+:where([data-enemy-ai-pane], .emblem-aiset) .acp-row-split > .acp-cond-num { flex: 0 0 96px; }
+
+/* -------------------------------------------- */
+/*  Combat AI tab                               */
+/* -------------------------------------------- */
+
+/* The note shown in place of the AI controls stays in the DOM, so the Faction tab's Actor Type select can show and
+   hide it; this rule hides it while it has the hidden attribute. */
+[data-enemy-ai-pane] .acp-empty-note[hidden] {
+  display: none;
+}
+
+/* -------------------------------------------- */
+/*  Set Combat AI on Selected                   */
+/* -------------------------------------------- */
+
+/* The window borrows the tab's .acp-* and .ed-* markup, which the system styles only inside its panel and its editor
+   dialogs (.dialog-editor), so the window's own look is set here. Each rule starts with the window's class, which
+   ranks it above the system's .acp-btn hover rules. */
+
+/* The window's content scrolls when the window is made shorter than its fields. */
+.emblem-ai-overwrite .window-content {
+  overflow-y: auto;
+}
+
+/* The system colours these labels with its panel's --acp-mu, which the window does not have. */
+.emblem-ai-overwrite .acp-field .ed-label {
+  color: var(--enemy-ai-muted);
+}
+
+.emblem-ai-overwrite .emblem-aiset.ed-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+}
+
+.emblem-ai-overwrite .emblem-aiset .ed-select,
+.emblem-ai-overwrite .emblem-aiset .ed-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 5px;
+  border: 0 solid;
+  font-size: 12px;
+}
+
+.emblem-ai-overwrite .emblem-aiset .ed-input--compact { font-size: 11px; }
+
+.emblem-ai-overwrite .emblem-aiset .acp-btn {
+  background: transparent;
+  border: 1px solid var(--color-border-light-2);
+  color: inherit;
+  font-size: 11px;
+  padding: 2px 10px;
+  line-height: 1.2;
+  border-radius: 3px;
+  height: auto;
+  min-height: 0;
+}
+
+.emblem-ai-overwrite .emblem-aiset .acp-btn:hover:not(:disabled) {
+  background: var(--color-cool-5);
+  border-color: var(--color-border-light-2);
+}
+
+.emblem-ai-overwrite .emblem-aiset .acp-btn-icon {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: none;
+}
+
+.emblem-ai-overwrite .emblem-aiset .acp-cond-delete { color: var(--emblem-delete, #a84343); }
+
+.emblem-ai-overwrite .emblem-aiset .acp-cond-delete:hover { color: var(--emblem-delete-hover, #e04b4b); }
+
+.emblem-ai-overwrite .emblem-aiset .ed-checkbox {
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.emblem-ai-overwrite .emblem-aiset .aiset-block { display: flex; flex-direction: column; gap: 8px; }
+
+.emblem-ai-overwrite .emblem-aiset .aiset-block.is-off { opacity: 0.4; filter: saturate(0.25); pointer-events: none; }
+
+.emblem-ai-overwrite .emblem-aiset .aiset-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 0;
+  color: var(--enemy-ai-text);
+  cursor: var(--cursor-pointer);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.emblem-ai-overwrite .emblem-aiset .aiset-rule {
+  border: none;
+  border-top: 1px solid var(--color-cool-4);
+  margin: 2px 0;
+}

@@ -1,10 +1,17 @@
 /** @layer driver */
-import { ABORT_DOUBLE_PRESS_MS, LOG } from '../constants.mjs';
-import { documentByUuid, writeCombatMode } from '../foundry/flags.mjs';
+/*
+ * What this client remembers about playing the enemy phase, in memory only: the run in progress, stop requests, the
+ * phases it ran or gave up on, the board hold, resume offers and the double-Space abort key. Only the functions in this
+ * file change it.
+ */
+import { LOG } from '../constants.mjs';
+import { documentByUuid } from '../foundry/documents.mjs';
+import { writeCombatMode } from '../foundry/flags.mjs';
 import { isCommandHost } from '../foundry/system-bridge.mjs';
+import { ABORT_DOUBLE_PRESS_MS } from './timing.mjs';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Driver state                                */
 /* -------------------------------------------- */
 /**
  * The abort key, pressed twice quickly to stop a run. It is Space, the default of the system's Select and Confirm
@@ -13,37 +20,37 @@ import { isCommandHost } from '../foundry/system-bridge.mjs';
 const ABORT_KEY = 'Space';
 /** The selector for the fields a keystroke belongs to rather than the map. */
 const TEXT_FIELDS = 'input, textarea, select, [contenteditable="true"]';
+/** The notice a GM sees once the AI's run has been asked to stop after its current action. */
+export const AI_STOP_NOTICE = 'Enemy AI will stop after its current action.';
 
 /**
- * Everything this page remembers about playing the enemy phase, in one place. None of it is saved; the stop mark a
- * reloaded page reads is a flag on the Combat (`foundry/flags.mjs`).
- *
- * `beginRun` and `endRun` start and finish a run. `stoppedPhase`, `ranPhases` and `resumeOffered` outlive the run:
- * this page never plays a phase it gave up on, and never offers to resume a phase it ran itself.
+ * Everything this client remembers about playing the enemy phase, kept in memory only and changed only by the
+ * functions in this file. `stoppedPhase`, `ranPhases` and `resumeOffered` outlive a run: this client never plays a
+ * phase it gave up on, and never offers to resume a phase it ran itself.
  */
-export const DRIVER = {
+const DRIVER = {
   /** The active phase run, or null while the driver is idle. */
   running: null,
-  /** Whether the GM has asked the run to stop. */
+  /** Whether this client has asked the run to stop, through `requestAbort`. */
   abortRequested: false,
   /** When the first of the two abort presses landed. */
   lastAbortKeyAt: 0,
-  /** The live abort listener, while the AI holds the board. */
+  /** The double-Space listener, while the AI holds the movement lock. */
   abortKeyHandler: null,
-  /** Whether this page holds the system's board hold. Page memory only; the hold itself is a world setting. */
+  /** Whether this client holds the system's board hold. Kept in memory only; the hold itself is a world setting. */
   holdingBoard: false,
-  /** The phase a run stopped driving after an uncertain outcome. This page never drives that phase again. */
+  /** The phase a run gave up on after an uncertain result. This client never plays that phase again. */
   stoppedPhase: '',
-  /** The phases this page has run, however each run ended. This page never offers to resume one of them. */
+  /** The phases this client has run, however each run ended. This client never offers to resume one of them. */
   ranPhases: new Set(),
-  /** The resume prompts this page has offered, by host session and encounter. */
+  /** The resume prompts this client has offered, by host session and encounter. */
   resumeOffered: new Set(),
-  /** The resume check under way, which later callers join rather than starting another. */
+  /** The resume check under way, which a later check joins instead of starting its own. */
   resumeCheck: null
 };
 
 /* -------------------------------------------- */
-/*  Transitions                                 */
+/*  The run, stop requests and finished phases  */
 /* -------------------------------------------- */
 /** Take the run: the driver is busy from here until `endRun`. */
 export function beginRun(run) {
@@ -63,7 +70,12 @@ export function isRunning() {
   return DRIVER.running !== null;
 }
 
-/** Whether the phase run in progress drives this encounter. */
+/** The phase run in progress, or null while the driver is idle. */
+export function activeRun() {
+  return DRIVER.running;
+}
+
+/** Whether the phase run in progress plays this encounter. */
 export function drivesEncounter(combatUuid) {
   return Boolean(combatUuid) && DRIVER.running?.combatUuid === combatUuid;
 }
@@ -76,7 +88,7 @@ export function requestAbort() {
   if (!DRIVER.running || DRIVER.abortRequested) return;
   DRIVER.abortRequested = true;
   DRIVER.running.segment.requestStop();
-  globalThis.ui?.notifications?.info('Enemy AI will stop after its current action.');
+  globalThis.ui?.notifications?.info(AI_STOP_NOTICE);
   const combat = documentByUuid(DRIVER.running.combatUuid);
   if (!combat) return;
   Promise.resolve(writeCombatMode(combat, 'off'))
@@ -84,40 +96,86 @@ export function requestAbort() {
 }
 
 /**
- * Whether the run has been asked to stop. A stop asked for by any GM through the system is treated like the
- * double-Space abort.
+ * Whether the run has been asked to stop, on this client or by any GM through the system. It only reads, so the
+ * system's quiet-map wait may poll it.
  */
 export function abortWanted() {
-  if (!DRIVER.abortRequested && DRIVER.running?.segment.stopRequested === true) requestAbort();
-  return DRIVER.abortRequested;
+  return DRIVER.abortRequested || DRIVER.running?.segment.stopRequested === true;
 }
 
-/** Remember that this page gave up on a phase, keyed the way `phaseKey` describes one. */
+/**
+ * Treat a stop any GM asked for through the system like the double-Space abort: switch the AI off and tell the GM.
+ * Does nothing when no such stop is waiting or this client has already asked the run to stop.
+ */
+export function abortOnSystemStop() {
+  if (!DRIVER.abortRequested && DRIVER.running?.segment.stopRequested === true) requestAbort();
+}
+
+/** Remember that this client gave up on a phase, keyed the way `phaseKey` describes one. */
 export function markPhaseStopped(key) {
   DRIVER.stoppedPhase = key;
 }
 
-/** Whether this page is the one that gave up on a phase. */
+/** Whether this client is the one that gave up on a phase. */
 export function phaseWasStopped(key) {
   return DRIVER.stoppedPhase === key;
 }
 
-/** Remember that this page ran a phase, keyed the way `phaseKey` describes one. */
+/** Remember that this client ran a phase, keyed the way `phaseKey` describes one. */
 export function markPhaseRan(key) {
   DRIVER.ranPhases.add(key);
 }
 
-/** Whether this page has already run a phase, so no reload interrupted it. */
+/** Whether this client has already run a phase, so no reload interrupted it. */
 export function phaseWasRun(key) {
   return DRIVER.ranPhases.has(key);
+}
+
+/* -------------------------------------------- */
+/*  Board hold and resume offers                */
+/* -------------------------------------------- */
+/** Remember that this client took the system's board hold. */
+export function markBoardHeld() {
+  DRIVER.holdingBoard = true;
+}
+
+/** Remember that this client no longer holds the system's board hold. */
+export function markBoardReleased() {
+  DRIVER.holdingBoard = false;
+}
+
+/** Whether this client took the system's board hold and has not released it since. */
+export function holdsBoard() {
+  return DRIVER.holdingBoard;
+}
+
+/** Remember that this client offered to resume a phase, keyed by host session and encounter. */
+export function markResumeOffered(offer) {
+  DRIVER.resumeOffered.add(offer);
+}
+
+/** Whether this client has already offered to resume a phase, keyed by host session and encounter. */
+export function resumeWasOffered(offer) {
+  return DRIVER.resumeOffered.has(offer);
+}
+
+/**
+ * The resume check under way, or a new one from `start` when none is. Later callers join the one under way, and it
+ * is forgotten once it finishes, however it ends.
+ * @param {() => Promise<boolean>} start Starts a resume check.
+ * @returns {Promise<boolean>} Whether the check resumed a phase.
+ */
+export function joinResumeCheck(start) {
+  DRIVER.resumeCheck ??= start().finally(() => { DRIVER.resumeCheck = null; });
+  return DRIVER.resumeCheck;
 }
 
 /* -------------------------------------------- */
 /*  The abort key                               */
 /* -------------------------------------------- */
 /**
- * Listen for the double-Space abort while the AI holds the board, on the host client only. The listener runs in the
- * capture phase and stops each Space press outside a text field, so Foundry's keybindings (the system's
+ * Listen for the double-Space abort while the AI holds the movement lock, on the host client only. The listener runs
+ * in the capture phase and stops each Space press outside a text field, so Foundry's keybindings (the system's
  * Select/Confirm is also Space) never see it while the AI plays.
  */
 export function attachAbortKey() {

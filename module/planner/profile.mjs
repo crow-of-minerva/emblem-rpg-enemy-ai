@@ -1,23 +1,32 @@
 /** @layer planner */
+/*
+ * A unit's AI profile, priority and risk weights, whether it is Manual or Passive, and the directive its conditions
+ * give it now. An Unpredictable unit's rolls are fixed for the round.
+ */
 import {
-  AI_LURE_BLIND_BEHAVIORS,
   AI_MANUAL_PROFILE,
   AI_PRIORITY_DEFAULT,
   AI_PROFILE_DEFAULT,
   AI_PROFILE_VALUES,
-  RISK_PROFILES
+  PROFILE_RETREATS_WHEN_BROKEN
 } from '../constants.mjs';
-import { sceneUuidOfToken } from '../foundry/flags.mjs';
+import { sceneUuidOfToken } from '../foundry/documents.mjs';
 import { aiConditionContext, currentCombatRound } from './board.mjs';
 import { resolveDirective } from './conditions.mjs';
-import { hashToUnit } from './vocabulary.mjs';
+import { RISK_PROFILES } from './tuning.mjs';
+
+/** Behaviours under which a unit is not looking for something to hit, and so is not fooled by an illusion. */
+const AI_LURE_BLIND_BEHAVIORS = Object.freeze(['seize', 'retreat']);
 
 /* -------------------------------------------- */
-/*  Posture                                     */
+/*  Profiles                                    */
 /* -------------------------------------------- */
-/** A unit's AI profile, falling back to the default for anything unrecognised. */
+/**
+ * The AI profile a unit plays by: the one a Switch AI Profile condition switched it to this battle, else the GM's,
+ * falling back to the default for anything unrecognised.
+ */
 export function profileOf(unit) {
-  const profile = unit?.ai?.profile;
+  const profile = unit?.ai?.switchedProfile || unit?.ai?.profile;
   return AI_PROFILE_VALUES.includes(profile) ? profile : AI_PROFILE_DEFAULT;
 }
 
@@ -37,7 +46,7 @@ export function priorityOf(unit) {
   return Number.isFinite(priority) ? priority : AI_PRIORITY_DEFAULT;
 }
 
-/** Split a roster into the units the AI drives and the manual ones it must leave alone. */
+/** Split a roster into the units the AI plays and the Manual ones it must leave alone. */
 export function partitionManual(units) {
   const driven = [];
   const manual = [];
@@ -45,12 +54,14 @@ export function partitionManual(units) {
   return { driven, manual };
 }
 
-/** Whether a unit falls back when its stance breaks, which is a property of its profile. */
+/**
+ * Whether a unit falls back when its stance breaks, as its profile sets in AI_PROFILES. A coin-flip profile
+ * (Unpredictable) gets one flip per round.
+ */
 export function retreatsWhenBroken(planner, unit) {
-  const profile = profileOf(unit);
-  if (['defensive', 'aggressive', 'berserk', 'passive'].includes(profile)) return false;
-  if (profile === 'unpredictable') return unpredictableRoll(planner, unit, 'retreat') < 0.5;
-  return true;
+  const retreats = PROFILE_RETREATS_WHEN_BROKEN[profileOf(unit)];
+  if (retreats === 'coin') return unpredictableRoll(planner, unit, 'retreat') < 0.5;
+  return retreats;
 }
 
 /* -------------------------------------------- */
@@ -74,16 +85,34 @@ export function unpredictableRoll(planner, unit, question) {
   return hashToUnit(`${round ?? 0}|${unit?.actorUuid ?? ''}|${question}`);
 }
 
+/** A string's 32-bit FNV-1a hash. */
+function hashString(text) {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+/** A string's hash as a number in [0, 1): a repeatable stand-in for Math.random(). */
+function hashToUnit(text) {
+  return hashString(String(text)) / 4294967296;
+}
+
 /* -------------------------------------------- */
-/*  Authored directives                         */
+/*  Conditions                                  */
 /* -------------------------------------------- */
-/** The directive a unit's authored conditions resolve to right now, against its own Scene's round, or null. */
+/** The directive the GM's conditions on a unit resolve to right now, against its own Scene's round, or null. */
 export function directiveOf(planner, unit) {
   const sceneUuid = sceneUuidOfToken(unit.tokenUuid ?? '') || planner.sceneUuid;
   return resolveDirective(directiveFacts(unit), aiConditionContext(sceneUuid));
 }
 
-/** The values an authored condition reads off a unit. */
+/**
+ * The values a condition reads off a unit, and the profile it plays by now, which tells resolveDirective in
+ * conditions.mjs whether a Switch AI Profile entry is already in effect.
+ */
 export function directiveFacts(unit) {
   return {
     hp: unit.hp,
@@ -92,18 +121,15 @@ export function directiveFacts(unit) {
     movement: unit.movement,
     wasAggressed: unit.ai.wasAggressed,
     conditions: unit.ai.conditions,
-    spawnBehavior: unit.ai.spawnBehavior
+    spawnBehavior: unit.ai.spawnBehavior,
+    profile: profileOf(unit)
   };
 }
 
-/** Whether a dormant unit has an authored instruction that would wake it right now. */
-export function wakesFromPassive(planner, unit) {
-  const directive = directiveOf(planner, unit);
-  if (directive?.behavior !== 'switchProfile') return false;
-  return directive.profile !== 'passive';
-}
-
-/** Whether a unit is looking for something to hit at all, and so whether an illusion has anything to offer it. */
+/**
+ * Whether an illusion has nothing to offer this unit: it is Passive, or its Seize or Retreat directive means it is not
+ * looking for something to hit.
+ */
 export function ignoresLures(planner, unit) {
   if (isPassive(unit)) return true;
   const directive = directiveOf(planner, unit);

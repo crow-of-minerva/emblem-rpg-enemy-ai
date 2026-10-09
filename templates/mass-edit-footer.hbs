@@ -1,0 +1,11 @@
+{{!-- The buttons of the Set Combat AI on Selected window, its footer part; its data comes from _prepareContext in
+module/ui/mass-edit.mjs. Overwrite submits the window's form, which is also what Enter in a number field does, and is
+disabled while neither Overwrite box would write anything. Cancel closes the window. --}}
+<footer class="form-footer">
+  <button type="submit" {{#unless canApply}}disabled{{/unless}} autofocus>
+    <i class="fas fa-brain"></i><span>{{applyLabel}}</span>
+  </button>
+  <button type="button" data-action="close">
+    <i class="fas fa-times"></i><span>Cancel</span>
+  </button>
+</footer>

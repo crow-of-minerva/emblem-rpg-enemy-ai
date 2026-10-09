@@ -1,5 +1,5 @@
 /** @layer enemy-ai */
-import { installEnemyAiHooks } from './module/foundry/hooks.mjs';
+import { installEnemyAiHooks } from './module/hooks.mjs';
 
 /* -------------------------------------------- */
 /*  Module Entry                                */

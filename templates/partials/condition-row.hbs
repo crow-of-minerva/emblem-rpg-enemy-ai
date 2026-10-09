@@ -1,0 +1,67 @@
+{{!-- One AI condition entry in the Combat AI tab and in Set Combat AI on Selected, registered at init as the partial
+enemy-ai-condition-row, with its data from conditionRow in module/ui/condition-rows.mjs. The template that includes it
+names the attribute its buttons carry as actionAttribute: data-ai-action in the tab, data-action in the window. Each
+field is a label wrapped around its control, so clicking a field's name focuses the control. --}}
+<div class="acp-cond-entry {{#unless collapsed}}is-open{{/unless}}" data-cond-index="{{index}}">
+  <header class="acp-cond-header" {{actionAttribute}}="toggleCondition" data-index="{{index}}">
+    <i class="fas fa-chevron-down acp-cond-chevron"></i>
+    <span class="acp-cond-title" data-cond-summary>{{summary}}</span>
+    <button type="button" class="acp-btn acp-btn-icon acp-cond-delete" {{actionAttribute}}="removeCondition"
+      data-index="{{index}}" data-tooltip="Remove entry">
+      <i class="fas fa-trash"></i>
+    </button>
+  </header>
+
+  <div class="acp-cond-body">
+    <div class="acp-row acp-row-split">
+      <label class="acp-field">
+        <span class="ed-label">Condition</span>
+        <select class="ed-select ed-input--compact" data-cond-field="type" data-index="{{index}}">
+          {{#each typeOptions}}
+            <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+          {{/each}}
+        </select>
+      </label>
+      <label class="acp-field acp-cond-num" data-cond-num-row="{{index}}" {{#unless showNum}}hidden{{/unless}}>
+        <span class="ed-label">
+          From Round
+          <span class="acp-help-dot" data-tooltip="Round this entry starts applying, continuing every round after"
+            data-tooltip-direction="LEFT">?</span>
+        </span>
+        <input type="number" class="ed-input ed-input--compact" data-cond-field="num" data-index="{{index}}"
+          value="{{num}}" min="1" step="1" />
+      </label>
+    </div>
+
+    <label class="acp-field">
+      <span class="ed-label">Behavior</span>
+      <select class="ed-select ed-input--compact" data-cond-field="behavior" data-index="{{index}}">
+        {{#each behaviorOptions}}
+          <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+        {{/each}}
+      </select>
+    </label>
+
+    <label class="acp-field acp-cond-profile" data-cond-profile-row="{{index}}"
+      {{#unless showProfile}}hidden{{/unless}}>
+      <span class="ed-label">Switch To</span>
+      <select class="ed-select ed-input--compact" data-cond-field="profile" data-index="{{index}}">
+        {{#each profileOptions}}
+          <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+        {{/each}}
+      </select>
+    </label>
+
+    {{!-- No max when there is no movement to cap it at, as for an actor with no token on the map. --}}
+    <label class="acp-field acp-cond-variable" data-cond-variable-row="{{index}}"
+      {{#unless showVariable}}hidden{{/unless}}>
+      <span class="ed-label">
+        Max Squares
+        <span class="acp-help-dot" data-tooltip="Squares of movement to spend each turn, 0 for full movement"
+          data-tooltip-direction="RIGHT">?</span>
+      </span>
+      <input type="number" class="ed-input ed-input--compact" data-cond-field="variable" data-index="{{index}}"
+        value="{{variable}}" min="0" {{#if variableMax}}max="{{variableMax}}"{{/if}} step="1" />
+    </label>
+  </div>
+</div>

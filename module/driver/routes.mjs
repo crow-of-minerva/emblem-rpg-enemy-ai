@@ -1,25 +1,30 @@
 /** @layer driver */
-import { LOG, ORTHOGONAL_STEPS } from '../constants.mjs';
+/*
+ * The route a unit walks, rebuilt from a movement search, and that route cut into walked stretches and teleports
+ * between paired pads.
+ */
+import { LOG } from '../constants.mjs';
 import { board } from '../planner/board.mjs';
-import { cellKey, parseCellKey } from '../planner/vocabulary.mjs';
+import { cellKey, parentPath } from '../planner/grid.mjs';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Constants                                   */
 /* -------------------------------------------- */
-/** How far a route walk-back may descend before it is called a cycle. */
-const ROUTE_GUARD = 1000;
+/** The most steps a walk down the search's movement costs takes before it gives up. */
+const DESCENT_GUARD = 1000;
+/** The steps to a square's four neighbours: up, right, down and left. */
+const ORTHOGONAL_STEPS = Object.freeze([[0, -1], [1, 0], [0, 1], [-1, 0]]);
 
 /* -------------------------------------------- */
 /*  Routes                                      */
 /* -------------------------------------------- */
 /**
- * The route a movement search took, rebuilt from its parent links, or by walking down the cost field when those
- * fail. Null when neither reaches the unit. `driver/performing.mjs` walks what this returns, cut into runs by
- * {@link segmentRoute}.
+ * The route a movement search took from the unit's square to a destination, the unit's square left out, or null. It
+ * is rebuilt from the search's parent links, or by walking down its movement costs when those do not lead back.
  */
 export function routeFrom(graph, fromX, fromY, destination) {
   if (!graph || !destination) return null;
-  const parented = parentRoute(graph, fromX, fromY, destination);
+  const parented = parentPath(graph, destination, { x: fromX, y: fromY })?.slice(1);
   if (parented) return parented;
   if (graph.parentByCell) {
     console.warn(`${LOG} a parent route did not start at the unit; falling back to a cost descent.`);
@@ -27,27 +32,7 @@ export function routeFrom(graph, fromX, fromY, destination) {
   return costRoute(graph, fromX, fromY, destination);
 }
 
-/** Walk the parent chain back from a destination key to the unit's own square. */
-function parentRoute(graph, fromX, fromY, destination) {
-  const parents = graph.parentByCell;
-  if (!parents) return null;
-  const startKey = cellKey(fromX, fromY);
-  const route = [];
-  let current = cellKey(destination.x, destination.y);
-  let guard = 0;
-  while (current !== startKey && guard < ROUTE_GUARD) {
-    guard += 1;
-    const cell = parseCellKey(current);
-    if (!Number.isFinite(cell.x) || !Number.isFinite(cell.y)) return null;
-    route.push([cell.x, cell.y]);
-    const parent = parents[current];
-    if (!parent) return null;
-    current = parent;
-  }
-  return current === startKey ? route.reverse() : null;
-}
-
-/** Descend the cost field from a destination to the unit's square, for a graph with no parent chain. */
+/** Walk down the search's movement costs from a destination to the unit's square, for when parent links do not. */
 function costRoute(graph, fromX, fromY, destination) {
   const costs = graph.costByCell;
   if (!costs) return null;
@@ -55,7 +40,7 @@ function costRoute(graph, fromX, fromY, destination) {
   let x = destination.x;
   let y = destination.y;
   let guard = 0;
-  while ((x !== fromX || y !== fromY) && guard < ROUTE_GUARD) {
+  while ((x !== fromX || y !== fromY) && guard < DESCENT_GUARD) {
     guard += 1;
     const step = cheaperNeighbour(costs, x, y);
     if (!step) return null;

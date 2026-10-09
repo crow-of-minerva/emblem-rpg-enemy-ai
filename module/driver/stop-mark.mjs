@@ -1,6 +1,11 @@
 /** @layer driver */
+/*
+ * The stop mark. When a run stops after an uncertain result, the phase is recorded on the encounter's Combat, so
+ * neither this client nor a reloaded host client plays or offers that phase again.
+ */
 import { LOG } from '../constants.mjs';
-import { clearStopMark, documentByUuid, readStopMark, writeStopMark } from '../foundry/flags.mjs';
+import { documentByUuid } from '../foundry/documents.mjs';
+import { clearStopMark, readStopMark, writeStopMark } from '../foundry/flags.mjs';
 import { encounterState } from '../foundry/system-bridge.mjs';
 import { markPhaseStopped, phaseWasStopped } from './state.mjs';
 
@@ -13,27 +18,26 @@ export function phaseKey(phase) {
 }
 
 /**
- * Whether this phase was stopped after an uncertain outcome, by this page or by an earlier host page that recorded
- * it on the encounter before a reload. A mark an earlier phase or round left is cleared instead.
+ * Whether this phase was stopped after an uncertain outcome, by this client or by the host client before a reload,
+ * which recorded it on the encounter. It only reads; `forgetStaleStopMark` clears a mark an earlier phase left.
  */
 export function phaseStopped(state) {
   if (phaseWasStopped(phaseKey(state))) return true;
-  const combat = documentByUuid(state.combatUuid ?? '');
-  const mark = readStopMark(combat);
-  if (!mark) return false;
-  if (phaseKey(mark) === phaseKey(state)) return true;
-  Promise.resolve(clearStopMark(combat))
-    .catch(error => console.error(`${LOG} could not clear an earlier phase's Enemy AI stop mark.`, error));
-  return false;
+  const mark = readStopMark(documentByUuid(state.combatUuid ?? ''));
+  return mark !== null && phaseKey(mark) === phaseKey(state);
 }
 
-/** Clear the stop mark on a planner's encounter once its phase or round has moved on. */
+/** On the host client as each phase begins, clear the stop mark an earlier phase or round left on the encounter. */
 export function forgetStaleStopMark(planner) {
   const state = encounterState(planner.sceneUuid);
-  if (state?.combatUuid) phaseStopped(state);
+  const combat = documentByUuid(state?.combatUuid ?? '');
+  const mark = readStopMark(combat);
+  if (!mark || phaseKey(mark) === phaseKey(state)) return;
+  Promise.resolve(clearStopMark(combat))
+    .catch(error => console.error(`${LOG} could not clear an earlier phase's Enemy AI stop mark.`, error));
 }
 
-/** Record the uncertain stop on the encounter, so a reloaded host page neither drives nor offers this phase again. */
+/** Record the uncertain stop on the encounter, so a reloaded host client neither plays nor offers this phase again. */
 export async function markStopped(run) {
   markPhaseStopped(phaseKey(run));
   try {

@@ -1,43 +1,38 @@
 /** @layer planner */
-import { DEBUFF_SETUP_VALUE, PROFILE_ORDER_SPAN, PROFILE_TURN_ORDER, PURSUIT_DEFER_MARGIN } from '../constants.mjs';
+/*
+ * The enemy phase's roster: which units get a turn and which have nothing to do, the order they act in, and when a
+ * Seize or Pursue unit lets an ally that has not moved yet go first.
+ */
+import { PROFILE_ORDER_SPAN, PROFILE_TURN_ORDER } from '../constants.mjs';
 import { board } from './board.mjs';
-import { woundedFriendlies } from './planning.mjs';
-import {
-  directiveOf,
-  isManual,
-  isPassive,
-  priorityOf,
-  profileOf,
-  riskProfileFor,
-  unpredictableRoll,
-  wakesFromPassive
-} from './profile.mjs';
+import { standingDistance, unitCellKeys, unitDistance } from './grid.mjs';
+import { loadout, usableWeapons } from './loadout.mjs';
 import { takesOffAgain } from './movement.mjs';
+import { woundedFriendlies } from './planning.mjs';
+import { priorityOf, profileOf, riskProfileFor, unpredictableRoll } from './profile.mjs';
 import { planPursue } from './pursuit.mjs';
-import { fleesByStatus, isHeldByStatus, isStanceBroken } from './readiness.mjs';
-import { canAct, collectTargets, loadout, tauntorToken, usableWeapons } from './roster.mjs';
 import { planSeize } from './seize.mjs';
-import { bonusSelfHealItemsOf, healItemsOf, healThresholdOf } from './support.mjs';
-import { standingDistance, unitCellKeys, unitDistance } from './vocabulary.mjs';
+import { bonusSelfHealDue, healItemsOf, hurtEnoughFor } from './support.mjs';
+import { collectTargets } from './targeting.mjs';
+import { DEBUFF_SETUP_VALUE, PURSUIT_DEFER_MARGIN } from './tuning.mjs';
+import { TURN_KINDS, turnCourse } from './turn-course.mjs';
 
 /* -------------------------------------------- */
 /*  Who acts                                    */
 /* -------------------------------------------- */
+/** The kinds of turn that are played whatever lies within the unit's reach. */
+const COURSES_THAT_ACT = new Set([TURN_KINDS.FLEE, TURN_KINDS.DIRECTIVE_MOVE, TURN_KINDS.BROKEN]);
+
 /**
- * Whether this unit could do anything at all this phase. It is a quick capability test, not a plan, and the checks
- * are ordered on purpose. A feared unit always gets its turn, whatever its profile, because `driver/turn.mjs` must
- * spend it fleeing. A flier grounded by a stance break gets one to take off in, whatever lies within its reach.
+ * Whether this unit could do anything at all this phase: a quick test on its course, not a plan. A unit with a profile
+ * switch to save gets its turn, so the switch is saved when it first holds, and so does a grounded flier that can rise.
  */
 function canActThisPhase(planner, unit) {
   if (!unit) return false;
-  if (isManual(unit)) return false;
-  if (fleesByStatus(unit)) return true;
-  if (isPassive(unit)) return wakesFromPassive(planner, unit);
-  if (isHeldByStatus(unit)) return false;
-  if (isStanceBroken(unit)) return true;
-  if (!canAct(unit)) return false;
-  if (directiveOf(planner, unit)) return true;
-  if (tauntorToken(planner, unit)) return true;
+  const course = turnCourse(planner, unit);
+  if (course.switchTo || COURSES_THAT_ACT.has(course.kind)) return true;
+  if (course.kind !== TURN_KINDS.ACT) return false;
+  if (course.directive || course.tauntor) return true;
   if (takesOffAgain(unit)) return true;
   if (canHealSomeone(planner, unit)) return true;
   const weapons = usableWeapons(unit);
@@ -50,28 +45,29 @@ function canActThisPhase(planner, unit) {
   let maxRange = 0;
   for (const weapon of weapons) maxRange = Math.max(maxRange, weapon.range.maxRange ?? 0);
   if (maxRange <= 0) return false;
-  const bound = (Number(unit.movement) || 0) + maxRange;
+  const bound = unit.movement + maxRange;
   return targets.some(target => unitDistance(unit, target) <= bound);
 }
 
-/** The heal version of the reach check: a Heal-role item, and a wounded friendly within movement plus its range. */
+/**
+ * The heal version of the reach check. A bonus-action self-heal the unit would use now counts for every profile;
+ * otherwise it needs a profile that heals and a friendly hurt enough for a Heal-role item within movement plus range.
+ */
 function canHealSomeone(planner, unit) {
+  if (bonusSelfHealDue(unit)) return true;
   if (riskProfileFor(planner, unit).healWeight <= 0) return false;
-  const carried = loadout(unit).items;
-  const bonus = unit.turn?.bonusActionAvailable === true ? bonusSelfHealItemsOf(carried) : [];
-  const items = [...healItemsOf(carried), ...bonus];
+  const items = healItemsOf(loadout(unit).items);
   if (!items.length) return false;
   const allies = woundedFriendlies(planner, unit);
   if (!allies.length) return false;
   const dims = { width: unit.width, height: unit.height };
-  const movement = Number(unit.movement) || 0;
+  const movement = unit.movement;
   const freeTerrain = board(planner).terrain.travelBoundedByDistance !== true;
   for (const item of items) {
     const range = item.range;
     if (!range) continue;
-    const threshold = healThresholdOf(item);
     for (const ally of allies) {
-      if (!needsThisHeal(ally, threshold)) continue;
+      if (!hurtEnoughFor(ally, item)) continue;
       if (ally.tokenUuid === unit.tokenUuid) {
         if (range.minRange <= 0) return true;
         continue;
@@ -83,16 +79,12 @@ function canHealSomeone(planner, unit) {
   return false;
 }
 
-/** Whether one friendly is hurt enough for an item's own threshold. */
-function needsThisHeal(ally, threshold) {
-  const maxHp = Number(ally.hpMax) || 0;
-  if (maxHp <= 0) return false;
-  return ((Number(ally.hp) || 0) / maxHp) < threshold;
-}
-
 /**
- * Split the roster into the units that get a turn and the ones whose turns can simply be ended. `preparePhase` in
- * `driver/phase.mjs` calls it once per run.
+ * Split the roster into the units that get a turn and the ones whose turns can simply be ended.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit[]} units The units the AI plays this phase.
+ * @returns {{acting: import('./types.mjs').PlannerUnit[], idle: import('./types.mjs').PlannerUnit[]}} Both lists
+ *   keep the roster's order.
  */
 export function triage(planner, units) {
   const acting = [];
@@ -121,8 +113,11 @@ function setupValueOf(unit) {
 }
 
 /**
- * Order the acting units: authored priority, then units whose weapons break stance or apply debuffs, then profile,
+ * Order the acting units: the GM's priority, then units whose weapons break stance or apply debuffs, then profile,
  * then the roster's own order.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit[]} units The units that take a turn this phase.
+ * @returns {import('./types.mjs').PlannerUnit[]} A new list in the order they take their turns.
  */
 export function orderForPhase(planner, units) {
   return units
@@ -137,33 +132,36 @@ export function orderForPhase(planner, units) {
     .map(entry => entry.unit);
 }
 
-/** Where a profile falls in the phase, unpredictable units being drawn to a point anywhere in the span. */
+/** Where a unit's profile places it in the phase. A random place is drawn once per round, anywhere in the span. */
 function phaseRank(planner, unit) {
-  const profile = profileOf(unit);
-  if (profile === 'unpredictable') return unpredictableRoll(planner, unit, 'order') * PROFILE_ORDER_SPAN;
-  return PROFILE_TURN_ORDER[profile] ?? 1;
+  const order = PROFILE_TURN_ORDER[profileOf(unit)];
+  if (order === 'random') return unpredictableRoll(planner, unit, 'order') * PROFILE_ORDER_SPAN;
+  return order;
 }
 
 /* -------------------------------------------- */
 /*  Standing aside                              */
 /* -------------------------------------------- */
 /**
- * Whether this Seize or Pursue unit should stand aside and let an ally that has not moved yet clear the ground
- * first. `runQueue` in `driver/phase.mjs` then moves it to the back of the queue.
+ * Whether this Seize or Pursue unit should go to the back of the queue, so an ally that has not moved yet clears the
+ * ground first.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit about to take its turn.
+ * @param {import('./types.mjs').PlannerUnit[]} pending The units still queued to act this phase.
+ * @returns {boolean}
  */
 export function yieldsToPendingAlly(planner, unit, pending) {
   if (!unit || !pending.length) return false;
-  if (isManual(unit) || isPassive(unit)) return false;
-  if (isStanceBroken(unit) || !canAct(unit)) return false;
-  if (tauntorToken(planner, unit)) return false;
-  const directive = directiveOf(planner, unit);
+  const course = turnCourse(planner, unit);
+  if (course.kind !== TURN_KINDS.ACT) return false;
+  const directive = course.primary ?? course.fallback;
   const behavior = directive?.behavior;
   if (behavior !== 'seize' && behavior !== 'pursue') return false;
   const freeCells = pendingCells(unit, pending);
   if (!freeCells.size) return false;
   const budget = directive.budget;
-  const asIs = marchPlan(planner, unit, behavior, { budget });
-  const cleared = marchPlan(planner, unit, behavior, { budget, freeCells });
+  const asIs = marchPlan(planner, course.unit, behavior, { budget });
+  const cleared = marchPlan(planner, course.unit, behavior, { budget, freeCells });
   const clearedRemaining = cleared?.remaining;
   if (!Number.isFinite(clearedRemaining)) return false;
   const remaining = asIs?.remaining;

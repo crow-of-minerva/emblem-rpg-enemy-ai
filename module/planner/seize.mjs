@@ -1,4 +1,28 @@
 /** @layer planner */
+/*
+ * Seize: heading for the nearest Defense Point, finding what blocks the route, and when breaking through a wall or a
+ * unit beats walking round. It also decides which actions are worth a Seize unit pausing its advance for.
+ */
+import { canPass } from '../foundry/system-bridge.mjs';
+import { board, unitByTokenUuid } from './board.mjs';
+import { cellKey, footprintOccupiedIn, parentPath, parseCellKey, unitCellKeys } from './grid.mjs';
+import { canTarget, usableWeapons } from './loadout.mjs';
+import { boardMemo } from './memo.mjs';
+import { riskProfileFor } from './profile.mjs';
+import { isAlive } from './readiness.mjs';
+import { canAct } from './roster.mjs';
+import {
+  blockedCells,
+  engagementRing,
+  routeContext,
+  routeField,
+  routeFieldTo,
+  routeStop,
+  turnMovementCap
+} from './routing.mjs';
+import { measure } from './scoring.mjs';
+import { elevationAt, engagementIsPossible, moveCostAt, occupiedCells, reachableAnchors } from './squares.mjs';
+import { isHostileTo } from './targeting.mjs';
 import {
   BREACH_PROTECTED_BIAS,
   BREACH_VULNERABLE_BIAS,
@@ -9,24 +33,7 @@ import {
   SEIZE_DETOUR_DAMAGE_FRACTION,
   SEIZE_DETOUR_KILL_CHANCE,
   SEIZE_UNLOCK_TURNS
-} from '../constants.mjs';
-import { board, unitByTokenUuid } from './board.mjs';
-import { elevationAt, engagementIsPossible, moveCostAt, occupiedCells, reachableAnchors } from './geometry.mjs';
-import { boardMemo } from './memo.mjs';
-import { riskProfileFor } from './profile.mjs';
-import {
-  engagementRing,
-  fieldPath,
-  pursuitField,
-  pursuitFieldTo,
-  pursuitStop,
-  standableCells,
-  threatCells
-} from './pursuit.mjs';
-import { isAlive } from './readiness.mjs';
-import { areFriendly, canAct, canTarget, isHostileTo, pursuitRanges, usableWeapons } from './roster.mjs';
-import { measure } from './scoring.mjs';
-import { cellKey, footprintOccupiedIn, parseCellKey, unitCellKeys } from './vocabulary.mjs';
+} from './tuning.mjs';
 
 /* -------------------------------------------- */
 /*  Defense Points                              */
@@ -63,32 +70,8 @@ function standsOnDefendPoint(planner, unit) {
 /*  Obstruction                                 */
 /* -------------------------------------------- */
 /**
- * Whether one unit can move through another, used to name the units in a Seize unit's way. Based on the system's
- * `resolveMovementOccupancy`, which the API applies only inside `movement.getField` and offers no per-pair query for.
- *
- * A `passing` unit passes everything. Otherwise a unit passes anything `passable` or that takes no square
- * (`occupiesLanding` false), a broken wall, and a standing wall when it flies and the wall doesn't stop fliers.
- * Anything else, a locked Door or other Object included, is passed when exactly one of the two is airborne or when
- * their factions are friendly; an unknown faction blocks. The system now stops every unit at a locked Door and never
- * lets faction pass an Object, so this copy is out of date.
- */
-function canTokensPassThrough(unit, other) {
-  if (unit.passing === true) return true;
-  if (other.passable === true) return true;
-  if (other.occupiesLanding === false) return true;
-  if (other.destructible === true) {
-    if (other.destroyed === true) return true;
-    if (other.blocksFlyers === true) return false;
-    return unit.airborne === true;
-  }
-  if ((unit.airborne === true) !== (other.airborne === true)) return true;
-  return areFriendly(unit.factionRole, other.factionRole);
-}
-
-/**
  * Units and walls that would stop this unit and could be removed: living Characters and walls that can be broken. A
- * destroyed wall or a dead unit doesn't block. A hidden wall does, but it can't be struck, and a locked Door can't be
- * attacked at all, so each is left to the pathfinder as part of the map rather than listed as a blocker to force.
+ * hidden wall or a locked Door still blocks but can't be struck, so it is left to the pathfinder as part of the map.
  */
 function blockingTokens(planner, unit) {
   const blockers = [];
@@ -97,10 +80,16 @@ function blockingTokens(planner, unit) {
     if (other.destructible === true) {
       if (!breachable(other)) continue;
     } else if (other.isCharacter !== true || !isAlive(other)) continue;
-    if (canTokensPassThrough(unit, other)) continue;
+    if (passesThrough(unit, other)) continue;
     blockers.push(other);
   }
   return blockers;
+}
+
+/** Whether one unit may move through another, by the system's own pathfinding rule, asked once per pair per map. */
+function passesThrough(unit, other) {
+  return boardMemo(`passes|${unit.tokenUuid}|${other.tokenUuid}`,
+    () => canPass(unit.tokenUuid, other.tokenUuid)?.canPass === true);
 }
 
 /** Blockers that friendly Seize units have already committed to removing, out of this Scene's seize memory. */
@@ -121,7 +110,7 @@ function committedBlockers(planner, unit) {
  * action; this check also counts units that don't, such as a Chest or an unlocked Door.
  */
 function sharesSquare(planner, unit) {
-  return boardMemo(`shares|${unit.tokenId}`, () => {
+  return boardMemo(`shares|${unit.tokenUuid}`, () => {
     const mine = new Set(unitCellKeys(unit));
     return board(planner).units.some(other => other.tokenUuid !== unit.tokenUuid
       && unitCellKeys(other).some(key => mine.has(key)));
@@ -142,14 +131,14 @@ function breachable(blocker) {
  * The damage type to breach with, or null. Types the wall is immune to are skipped, and a weapon that rolls its
  * type per blow is used only when the wall is immune to none of its types.
  */
-function breachDamageType(wall, weapon, cData) {
-  const types = cData.validDamageTypes ?? [];
+function breachDamageType(wall, weapon, matchup) {
+  const types = matchup.validDamageTypes ?? [];
   if (types.length === 0) return null;
-  const immunities = cData.defenderImmunities ?? [];
+  const immunities = matchup.defenderImmunities ?? [];
   const allowed = types.filter(type => !immunities.includes(type));
   if (allowed.length === 0) return null;
   if (weapon.randomizeDamageType === true && allowed.length !== types.length) return null;
-  const chosen = cData.damageType ?? '';
+  const chosen = matchup.damageType ?? '';
   return allowed.includes(chosen) ? chosen : allowed[0];
 }
 
@@ -169,11 +158,11 @@ function breachMeasurement(unit, wall, weapon, distance, standing = null) {
   let first = null;
   for (const type of base.validDamageTypes ?? []) {
     if (immunities.includes(type)) continue;
-    const cData = type === base.damageType ? base : measure(unit, wall, weapon, distance, type, { standing });
-    if (!cData) continue;
-    if (cData.breakVulnerable === true) return cData;
-    if (!unresisted && cData.breakResisted !== true) unresisted = cData;
-    first ??= cData;
+    const matchup = type === base.damageType ? base : measure(unit, wall, weapon, distance, type, { standing });
+    if (!matchup) continue;
+    if (matchup.breakVulnerable === true) return matchup;
+    if (!unresisted && matchup.breakResisted !== true) unresisted = matchup;
+    first ??= matchup;
   }
   return unresisted ?? first;
 }
@@ -183,20 +172,22 @@ function breachMeasurement(unit, wall, weapon, distance, standing = null) {
  * option is valued by its expected break per turn.
  */
 function breachOption(unit, blocker, weapon, distance, standing = null) {
-  const cData = breachMeasurement(unit, blocker, weapon, distance, standing);
-  if (!cData) return null;
+  const matchup = breachMeasurement(unit, blocker, weapon, distance, standing);
+  if (!matchup) return null;
 
-  const brk = Math.max(0, Number(cData.breakDamage) || 0);
+  const brk = Math.max(0, Number(matchup.breakDamage) || 0);
   if (brk <= 0) return null;
-  const attacks = Math.max(1, Number(cData.attackCount) || 1);
-  const hitChance = Math.max(0, Math.min(100, Number(cData.hitChance) || 0)) / 100;
+  const attacks = Math.max(1, Number(matchup.attackCount) || 1);
+  const hitChance = Math.max(0, Math.min(100, Number(matchup.hitChance) || 0)) / 100;
   const perTurn = hitChance * brk * attacks;
   if (perTurn <= 0) return null;
 
-  const vulnerable = cData.breakVulnerable === true;
-  const resisted = cData.breakResisted === true;
+  const vulnerable = matchup.breakVulnerable === true;
+  const resisted = matchup.breakResisted === true;
   const bias = vulnerable ? BREACH_VULNERABLE_BIAS : (resisted ? BREACH_PROTECTED_BIAS : 1);
-  return { weapon, distance, dmgType: cData.damageType, cData, perTurn, vulnerable, resisted, value: perTurn * bias };
+  return {
+    weapon, distance, dmgType: matchup.damageType, matchup, perTurn, vulnerable, resisted, value: perTurn * bias
+  };
 }
 
 /**
@@ -204,10 +195,10 @@ function breachOption(unit, blocker, weapon, distance, standing = null) {
  * weapon is asked at its closest usable range from the square the unit stands on.
  */
 function breachOptions(unit, blocker) {
-  return boardMemo(`breach|${unit.tokenId}|${blocker.tokenId ?? '-'}`, () => buildBreachOptions(unit, blocker));
+  return boardMemo(`breach|${unit.tokenUuid}|${blocker.tokenUuid ?? '-'}`, () => buildBreachOptions(unit, blocker));
 }
 
-/** The rough answer `blockadeBeatsDetour` and `planBlockadeApproach` need before a Seize unit commits to a route. */
+/** Each weapon's breach option from where the unit stands, best first: a rough answer before it commits to a route. */
 function buildBreachOptions(unit, blocker) {
   if (!breachable(blocker)) return [];
   const weapons = usableWeapons(unit);
@@ -219,7 +210,7 @@ function buildBreachOptions(unit, blocker) {
     if (!range) continue;
     if (!canTarget(unit, weapon, blocker)) continue;
     const option = breachOption(unit, blocker, weapon, range.minRange);
-    if (option) options.push({ ...option, range });
+    if (option) options.push(option);
   }
   options.sort((a, b) => (b.value - a.value) || a.weapon.id.localeCompare(b.weapon.id));
   return options;
@@ -259,11 +250,10 @@ function breachAnchorOptions(unit, blocker, weapons, squares, graph) {
   const priced = new Map();
   const options = [];
   for (const weapon of weapons) {
-    const range = weapon.range;
-    if (!range) continue;
+    if (!weapon.range) continue;
     if (!canTarget(unit, weapon, blocker)) continue;
     for (const square of squares) {
-      const distance = engagementIsPossible(unit, square.x, square.y, blocker, range);
+      const distance = engagementIsPossible(unit, square.x, square.y, blocker, weapon);
       if (distance === null) continue;
       const key = `${weapon.id}|${distance}|${square.elevation}`;
       if (!priced.has(key)) {
@@ -271,7 +261,7 @@ function breachAnchorOptions(unit, blocker, weapons, squares, graph) {
       }
       const option = priced.get(key);
       if (!option) continue;
-      options.push({ ...option, range, graph, anchorX: square.x, anchorY: square.y, moveCost: square.moveCost });
+      options.push({ ...option, graph, anchorX: square.x, anchorY: square.y, moveCost: square.moveCost });
     }
   }
   options.sort((a, b) => {
@@ -282,7 +272,17 @@ function breachAnchorOptions(unit, blocker, weapons, squares, graph) {
   return options;
 }
 
-/** Swing at the wall from wherever swinging at it is worth the most, priced on the ordinary attack scale. */
+/**
+ * Swing at the wall from wherever swinging at it is worth the most, priced on the ordinary attack scale.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The Seize unit.
+ * @param {import('./types.mjs').PlannerUnit} blocker The Destructible wall in its way.
+ * @param {number} [unlock] How much breaking the wall shortens the route, from 0 to 1 of a turn's advance.
+ * @param {object} [options]
+ * @param {boolean} [options.stationary] Strike from the square the unit stands on, without moving.
+ * @param {number|null} [options.moveBudget] The most movement it may spend; null for all it has.
+ * @returns {import('./types.mjs').AttackPlan|null} A breach plan, or null when the unit can't act or reach the wall.
+ */
 export function planBreachStrike(planner, unit, blocker, unlock = 0, { stationary = false, moveBudget = null } = {}) {
   if (!unit || !blocker || blocker.destroyed === true) return null;
   if (!canAct(unit)) return null;
@@ -291,7 +291,7 @@ export function planBreachStrike(planner, unit, blocker, unlock = 0, { stationar
   const best = breachAnchors(planner, unit, blocker, { stationary, moveBudget })[0];
   if (!best) return null;
 
-  const integrity = Math.max(1, Number(blocker.stance) || 0);
+  const integrity = Math.max(1, blocker.stance);
   const breachScore = (SEIZE_BLOCKER_BONUS * unlock)
     + (SEIZE_BREACH_PROGRESS * Math.min(1, best.perTurn / integrity));
 
@@ -301,14 +301,13 @@ export function planBreachStrike(planner, unit, blocker, unlock = 0, { stationar
     breachScore,
     unit,
     target: blocker,
-    targetToken: blocker,
     weapon: best.weapon,
     dmgType: best.dmgType,
     distance: best.distance,
     destination: { x: best.anchorX, y: best.anchorY },
     needsMove: best.anchorX !== unit.x || best.anchorY !== unit.y,
     moveCost: best.moveCost,
-    cData: best.cData,
+    matchup: best.matchup,
     graph: best.graph
   };
 }
@@ -324,7 +323,7 @@ function blockersOnPath(unit, field, goal, blockers) {
   }
   const found = [];
   const seen = new Set();
-  for (const [px, py] of fieldPath(field, goal.x, goal.y)) {
+  for (const [px, py] of parentPath(field, goal) ?? []) {
     for (let dx = 0; dx < unit.width; dx += 1) {
       for (let dy = 0; dy < unit.height; dy += 1) {
         const hit = cells.get(cellKey(px + dx, py + dy));
@@ -337,20 +336,24 @@ function blockersOnPath(unit, field, goal, blockers) {
   return found;
 }
 
-/** Who is in the way, and how much removing them is worth as a fraction of a whole turn's advance. */
-function analyseSeizeBlockage(planner, unit, points, threat, risk, holders, standingRoute) {
+/**
+ * Who is in the way, and how much removing them is worth as a fraction of a whole turn's advance. The open route is
+ * searched with the blockers gone as well as the units holding the Defense Points, which every Seize search leaves out.
+ */
+function analyseSeizeBlockage(route, points, standingRoute) {
+  const { planner, unit, ignoreUnits: holders } = route;
   const blockers = blockingTokens(planner, unit);
   if (blockers.length === 0) return null;
 
   const ignore = new Set(blockers);
   if (holders) for (const holder of holders) ignore.add(holder);
-  const openField = pursuitField(planner, unit, threat, risk, null, ignore);
+  const openField = routeField(route, { ignoreUnits: ignore });
 
   let openGoal = null;
   for (const point of points) {
-    const route = openField?.routeByCell?.[cellKey(point.x, point.y)];
-    if (!Number.isFinite(route)) continue;
-    if (!openGoal || route < openGoal.route) openGoal = { x: point.x, y: point.y, route };
+    const cost = openField?.routeByCell?.[cellKey(point.x, point.y)];
+    if (!Number.isFinite(cost)) continue;
+    if (!openGoal || cost < openGoal.route) openGoal = { x: point.x, y: point.y, route: cost };
   }
   if (!openGoal) return null;
   if (openGoal.route >= standingRoute) return null;
@@ -363,7 +366,7 @@ function analyseSeizeBlockage(planner, unit, points, threat, risk, holders, stan
     ...onPath.filter(blocker => committed.has(blocker.tokenUuid)),
     ...onPath.filter(blocker => !committed.has(blocker.tokenUuid))
   ];
-  const movement = Math.max(1, Number(unit.movement) || 0);
+  const movement = Math.max(1, unit.movement);
   const unlock = standingRoute === Infinity
     ? 1
     : Math.min(1, (standingRoute - openGoal.route) / (movement * SEIZE_UNLOCK_TURNS));
@@ -379,49 +382,47 @@ function blockadeBeatsDetour(unit, blockage, standingRoute) {
   if (blocker.destructible === true) {
     const best = breachOptions(unit, blocker)[0];
     if (!best) return false;
-    const integrity = Math.max(1, Number(blocker.stance) || 0);
+    const integrity = Math.max(1, blocker.stance);
     turns = Math.ceil(integrity / best.perTurn);
   }
-  const movement = Math.max(1, Number(unit.movement) || 0);
+  const movement = Math.max(1, unit.movement);
   return blockage.openGoal.route + (turns * movement) < standingRoute;
 }
 
 /**
- * Move into attack range of the unit or wall blocking the route, or hold if already there. Records the chosen blocker
- * in the Scene's `seizeBlockers` memory, even when called only to test a plan.
+ * Move into attack range of the unit or wall blocking the route, or hold if already there. The plan carries the chosen
+ * `blocker`; the driver records it in the Scene's `seizeBlockers` memory when the unit takes its turn.
  */
-function planBlockadeApproach(planner, unit, blockage, field, threat, risk, budget, holders) {
+function planBlockadeApproach(route, blockage) {
+  const { planner, unit, field } = route;
   const startKey = cellKey(unit.x, unit.y);
   for (const blocker of blockage.candidates) {
-    const ranges = blocker.destructible === true
-      ? breachOptions(unit, blocker).map(option => option.range)
-      : pursuitRanges(unit);
-    const commit = plan => {
-      planner.seizeBlockers.set(unit.tokenUuid, blocker.tokenUuid);
-      return { ...plan, blocker, unlock: blockage.unlock };
-    };
+    const weapons = blocker.destructible === true
+      ? breachOptions(unit, blocker).map(option => option.weapon)
+      : usableWeapons(unit);
+    const commit = plan => ({ ...plan, blocker, unlock: blockage.unlock });
 
-    if (ranges.length > 0) {
-      const ring = engagementRing(planner, unit, blocker, ranges);
+    if (weapons.length > 0) {
+      const ring = engagementRing(planner, unit, blocker, weapons);
       if (ring.has(startKey)) return commit({ kind: 'hold' });
       const goal = nearestRingGoal(field, ring);
       if (goal) {
-        const stop = pursuitStop(planner, unit, field, goal, threat, risk, budget, holders);
+        const stop = routeStop(route, goal);
         if (!stop) return commit({ kind: 'hold' });
         return commit({ kind: 'move', destination: { x: stop.x, y: stop.y }, graph: field, path: stop.path });
       }
     }
 
-    const toBlocker = pursuitFieldTo(planner, unit, threat, risk, { x: blocker.x, y: blocker.y }, blockage.ignore);
+    const toBlocker = routeFieldTo(route, { x: blocker.x, y: blocker.y }, blockage.ignore);
     if (!toBlocker?.routeByCell) continue;
     const goal = { x: blocker.x, y: blocker.y, target: null };
-    const stop = pursuitStop(planner, unit, field, goal, threat, risk, budget, holders, toBlocker.routeByCell);
+    const stop = routeStop(route, goal, { toGoal: toBlocker.routeByCell });
     if (stop) return commit({ kind: 'move', destination: { x: stop.x, y: stop.y }, graph: field, path: stop.path });
   }
   return null;
 }
 
-/** The cheapest square of a ring the field can actually reach, as a goal with no target unit. */
+/** The cheapest square of a ring the unit's route search (`field.routeByCell`) reaches, as a goal with no target. */
 function nearestRingGoal(field, ring) {
   let goal = null;
   for (const key of ring) {
@@ -438,15 +439,15 @@ function nearestRingGoal(field, ring) {
 /*  Seize                                       */
 /* -------------------------------------------- */
 /**
- * A move that ends this turn on a Defense Point, or null. A capture beats anything else the unit could do. The cost
+ * A move that ends this turn on a Defense Point, or null; a capture beats anything else the unit could do. The cost
  * checked is the threat-avoiding route's, so a point reachable this turn only through threat is not taken.
  */
-function planSeizeCapture(unit, points, field, budget, freeCells = null) {
-  const allowance = unit.turn?.movementAvailable === false ? 0 : (Number(unit.movement) || 0);
-  const cap = budget === null ? allowance : Math.min(budget, allowance);
+function planSeizeCapture(route, points, freeCells = null) {
+  const { unit, field } = route;
+  const cap = turnMovementCap(unit, route.budget);
   if (cap <= 0) return null;
 
-  const occupied = standableCells(unit, freeCells);
+  const occupied = blockedCells(unit, freeCells);
   const dims = { width: unit.width, height: unit.height };
   let best = null;
   for (const point of points) {
@@ -461,15 +462,22 @@ function planSeizeCapture(unit, points, field, budget, freeCells = null) {
     capture: true,
     destination: { x: best.x, y: best.y },
     graph: field,
-    path: fieldPath(field, best.x, best.y).slice(1),
+    path: parentPath(field, best)?.slice(1) ?? [],
     remaining: 0
   };
 }
 
 /**
- * Drive for the nearest Defense Point: arrive if possible, break through a blocker if that beats walking round,
- * otherwise close in. Runs for a Seize directive, and also to decide whether a unit should wait for an ally.
- * Returns null, and the unit does nothing, when no route to a Defense Point is found within the search range.
+ * Head for the nearest Defense Point: arrive if possible, break through a blocker if that beats walking round,
+ * otherwise close in. Null, and the unit does nothing, when no route to a Defense Point lies within the search range.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The Seize unit.
+ * @param {object} [options]
+ * @param {number|null} [options.budget] The most movement it may spend; null for all it has.
+ * @param {import('./types.mjs').RiskProfile|null} [options.riskProfile] The weights it plans with; its own
+ *   profile's when null.
+ * @param {Set<string>|null} [options.freeCells] Occupied cell keys to treat as free to stop on.
+ * @returns {import('./types.mjs').MovePlan|import('./types.mjs').HoldPlan|null}
  */
 export function planSeize(planner, unit, { budget = null, riskProfile = null, freeCells = null } = {}) {
   const points = defendPoints(planner);
@@ -477,29 +485,29 @@ export function planSeize(planner, unit, { budget = null, riskProfile = null, fr
   if (standsOnDefendPoint(planner, unit)) return { kind: 'hold', capture: true, remaining: 0 };
 
   const risk = riskProfile ?? riskProfileFor(planner, unit);
-  const threat = threatCells(planner, unit);
   const holders = tokensOnCells(planner, points);
-  const field = pursuitField(planner, unit, threat, risk, null, holders);
+  const route = routeContext(planner, unit, risk, { budget, ignoreUnits: holders });
+  const field = route.field;
 
-  const capture = planSeizeCapture(unit, points, field, budget, freeCells);
+  const capture = planSeizeCapture(route, points, freeCells);
   if (capture) return capture;
 
   let goal = null;
   for (const point of points) {
-    const route = field?.routeByCell?.[cellKey(point.x, point.y)];
-    if (!Number.isFinite(route)) continue;
-    if (!goal || route < goal.route) goal = { x: point.x, y: point.y, route, target: null };
+    const cost = field?.routeByCell?.[cellKey(point.x, point.y)];
+    if (!Number.isFinite(cost)) continue;
+    if (!goal || cost < goal.route) goal = { x: point.x, y: point.y, route: cost, target: null };
   }
 
   const standingRoute = goal ? goal.route : Infinity;
-  const blockage = analyseSeizeBlockage(planner, unit, points, threat, risk, holders, standingRoute);
+  const blockage = analyseSeizeBlockage(route, points, standingRoute);
   if (blockage && blockadeBeatsDetour(unit, blockage, standingRoute)) {
-    const forced = planBlockadeApproach(planner, unit, blockage, field, threat, risk, budget, holders);
+    const forced = planBlockadeApproach(route, blockage);
     if (forced) return forced;
   }
   if (!goal) return null;
 
-  const stop = pursuitStop(planner, unit, field, goal, threat, risk, budget, holders, null, freeCells);
+  const stop = routeStop(route, goal, { freeCells });
   if (!stop) return { kind: 'hold', remaining: goal.route };
   return {
     kind: 'move',
@@ -513,6 +521,8 @@ export function planSeize(planner, unit, { budget = null, riskProfile = null, fr
 /**
  * Whether an action is worth a Seize unit pausing its advance for. The Defense Point is what it was sent for, so only
  * a heal, a breach, a blow at a blocker, a stance break, a likely kill or heavy damage qualifies.
+ * @param {import('./types.mjs').TurnPlan|null} plan The action the unit could take instead of advancing.
+ * @returns {boolean}
  */
 export function seizeDetourIsWorthy(plan) {
   if (!plan) return false;

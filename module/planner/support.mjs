@@ -1,10 +1,23 @@
 /** @layer planner */
-import { AI_ITEM_ROLE_VALUES, SUPPORT_ITEM_TYPES } from '../constants.mjs';
+/*
+ * The items the AI uses besides its weapons, today the ones the GM gave the Heal role: which kinds of item it may
+ * use, which heals it can pick, when a unit is hurt enough for one, and what a heal is worth.
+ */
+import { AI_ITEM_ROLE_VALUES, AI_ITEM_SUBTYPES } from '../constants.mjs';
+import {
+  itemIsConsumable,
+  itemReachesOneUnit,
+  itemTakesBonusAction,
+  itemTakesStandardAction,
+  itemTargetsSelf
+} from '../foundry/system-bridge.mjs';
+import { canActivate, canTarget, loadout } from './loadout.mjs';
+import { isAlive } from './readiness.mjs';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Item role and uses                          */
 /* -------------------------------------------- */
-/** The authored AI role of a loadout item, or null when it has none or names one the runtime does not offer. */
+/** The AI role the GM gave a loadout item, or null when it has none or names one this module does not offer. */
 function itemRole(item) {
   const role = item?.aiData?.role;
   return AI_ITEM_ROLE_VALUES.includes(role) ? role : null;
@@ -19,36 +32,69 @@ export function itemHasUses(item) {
 /* -------------------------------------------- */
 /*  Item selection                              */
 /* -------------------------------------------- */
+/**
+ * Whether the AI may use an item of this kind: a Consumable, or one of the subtypes in AI_ITEM_SUBTYPES. Only these
+ * items get the AI Parameters button on their sheet.
+ * @param {{type: string, itemType: string}} kind The Foundry item type and the system's subtype of the item.
+ * @returns {boolean}
+ */
+export function aiUsesItemKind(kind) {
+  return AI_ITEM_SUBTYPES.includes(kind.itemType) || itemIsConsumable(kind);
+}
+
 /** Items with the Heal role (support subtypes and Consumables) that heal one target with a standard action. */
 export function healItemsOf(items) {
   return (items ?? []).filter(item => itemRole(item) === 'heal'
-    && (SUPPORT_ITEM_TYPES.has(item.itemType) || item.type === 'Consumable')
-    && item.actionType === 'Standard Action'
-    && (item.rangeType ?? 'Single') === 'Single'
+    && aiUsesItemKind(item)
+    && itemTakesStandardAction(item)
+    && itemReachesOneUnit(item)
     && itemHasUses(item));
 }
 
 /**
- * Heal-role items that heal the user as a bonus action, such as Second Wind. `useBonusSelfHeal` in
- * `driver/performing.mjs` uses them between moving and acting. The planner never plans them.
+ * Heal-role items that heal the user as a bonus action, such as Second Wind. The planner never plans them; the unit's
+ * turn takes one through `bonusSelfHealDue`.
  */
 export function bonusSelfHealItemsOf(items) {
   return (items ?? []).filter(item => itemRole(item) === 'heal'
-    && (SUPPORT_ITEM_TYPES.has(item.itemType) || item.type === 'Consumable')
-    && item.actionType === 'Bonus Action'
-    && item.targetType === 'Self'
+    && aiUsesItemKind(item)
+    && itemTakesBonusAction(item)
+    && itemTargetsSelf(item)
     && itemHasUses(item));
+}
+
+/**
+ * The bonus-action self-heal a unit would use now, or null: the first Heal-role item it can use on itself as a bonus
+ * action while its HP is below that item's heal threshold. Every profile uses one, whatever its heal weight.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit as last read from the map.
+ * @returns {object|null} The loadout item.
+ */
+export function bonusSelfHealDue(unit) {
+  if (unit?.turn?.bonusActionAvailable !== true || !isAlive(unit)) return null;
+  return bonusSelfHealItemsOf(loadout(unit).items).find(item => item.range && hurtEnoughFor(unit, item)
+    && canActivate(unit, item) && canTarget(unit, item, unit)) ?? null;
 }
 
 /* -------------------------------------------- */
 /*  Valuation                                   */
 /* -------------------------------------------- */
 /** The health fraction below which a target qualifies for this item's heal. */
-export function healThresholdOf(item) {
+function healThresholdOf(item) {
   return item.aiData.threshold / 100;
 }
 
-/** How much this item is expected to heal: the authored amount, else the formula average, else infinity. */
+/**
+ * Whether a unit is hurt enough for this item's heal: alive, with its HP below the item's threshold share of its max.
+ * @param {{hp: number, hpMax: number}} unit The unit the heal would land on.
+ * @param {object} item A Heal-role loadout item.
+ * @returns {boolean}
+ */
+export function hurtEnoughFor(unit, item) {
+  if (unit.hpMax <= 0 || unit.hp <= 0) return false;
+  return unit.hp / unit.hpMax < healThresholdOf(item);
+}
+
+/** How much this item is expected to heal: the amount the GM set, else the formula average, else infinity. */
 export function healAmountOf(item) {
   const authored = item.aiData.amount;
   if (authored > 0) return authored;

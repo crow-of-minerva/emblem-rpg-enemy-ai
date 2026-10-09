@@ -1,84 +1,36 @@
 /** @layer planner */
+/*
+ * Which of the GM's condition entries applies to a unit right now, and the directive it gives. The entry format (a
+ * blank row, repairs, the saved shape and the terrain spawn's row) is in module/condition-entries.mjs.
+ */
 import {
   AI_BEHAVIORS_WITH_VARIABLE,
   AI_BEHAVIOR_VALUES,
-  AI_CONDITION_TARGETS,
   AI_CONDITION_TYPES,
-  AI_CONDITIONS_WITH_NUM,
   AI_HP_THRESHOLDS,
-  AI_PROFILE_DEFAULT,
-  AI_PROFILE_VALUES,
-  AI_ROUND_MIN
+  AI_PROFILE_VALUES
 } from '../constants.mjs';
+import { conditionNum, spawnConditionEntry } from '../condition-entries.mjs';
+import { isStanceBroken } from './readiness.mjs';
 
-/* -------------------------------------------- */
-/*  Vocabulary                                  */
-/* -------------------------------------------- */
-const SELF_TYPES = new Set(AI_CONDITION_TYPES.self.map(type => type.value));
-
-/** A blank condition entry. */
-export function defaultConditionEntry() {
-  return {
-    target: 'self', type: 'always', behavior: 'pursue', profile: AI_PROFILE_DEFAULT, variable: 0, num: AI_ROUND_MIN
-  };
-}
-
-/** Fill an editor row with values its current controls can display. */
-export function sanitizeConditionEntry(raw) {
-  const base = defaultConditionEntry();
-  const target = AI_CONDITION_TARGETS.some(entry => entry.value === raw?.target) ? raw.target : base.target;
-  const types = AI_CONDITION_TYPES[target];
-  const type = raw?.type;
-  return {
-    target,
-    type: types.some(entry => entry.value === type) ? type : types[0].value,
-    behavior: AI_BEHAVIOR_VALUES.includes(raw?.behavior) ? raw.behavior : base.behavior,
-    profile: AI_PROFILE_VALUES.includes(raw?.profile) ? raw.profile : base.profile,
-    variable: Math.max(0, Math.floor(Number(raw?.variable) || 0)),
-    num: conditionNum(raw)
-  };
-}
-
-/** Read saved conditions, keeping unknown types or behaviours as they are so they never fire. */
-export function normalizeStoredConditionEntry(raw) {
-  return Object.freeze({
-    ...sanitizeConditionEntry(raw),
-    target: String(raw?.target ?? ''),
-    type: String(raw?.type ?? ''),
-    behavior: String(raw?.behavior ?? ''),
-    profile: String(raw?.profile ?? '')
-  });
-}
-
-/** The condition's own number, floored at the minimum its type allows. */
-function conditionNum(entry) {
-  const requested = Math.floor(Number(entry?.num));
-  if (!Number.isFinite(requested)) return AI_ROUND_MIN;
-  return Math.max(AI_ROUND_MIN, requested);
-}
-
-/** Whether this condition type carries a number the author has to supply. */
-export function conditionTakesNum(type) {
-  return AI_CONDITIONS_WITH_NUM.includes(type);
-}
+const CONDITION_TYPES = new Set(AI_CONDITION_TYPES.map(type => type.value));
 
 /* -------------------------------------------- */
 /*  Evaluation                                  */
 /* -------------------------------------------- */
-/** Whether one authored self condition holds for this unit right now. Player conditions never hold. */
+/** Whether one of the GM's conditions holds for this unit right now. */
 function conditionHolds(entry, unit, context = {}) {
-  if (entry.target !== 'self') return false;
   const type = entry.type;
-  if (!SELF_TYPES.has(type)) return false;
-  const value = Number(unit.hp) || 0;
-  const max = Number(unit.hpMax) || 0;
+  if (!CONDITION_TYPES.has(type)) return false;
+  const value = unit.hp;
+  const max = unit.hpMax;
   const fraction = max > 0 ? value / max : 0;
   if (type in AI_HP_THRESHOLDS) return max > 0 && value > 0 && fraction < AI_HP_THRESHOLDS[type];
   switch (type) {
     case 'always':
       return true;
     case 'broken':
-      return (Number(unit.stance) || 0) <= 0;
+      return isStanceBroken(unit);
     case 'aggressed':
       return unit.wasAggressed;
     case 'atRound':
@@ -103,17 +55,27 @@ function movementBudget(entry, unit) {
   if (!AI_BEHAVIORS_WITH_VARIABLE.includes(entry.behavior)) return null;
   const requested = Number(entry.variable) || 0;
   if (requested <= 0) return null;
-  const allowance = Number(unit.movement) || 0;
+  const allowance = unit.movement;
   if (allowance <= 0) return 0;
   return Math.min(requested, allowance);
 }
 
-/** The first authored entry that currently holds, as a directive. Null means the unit takes its normal turn. */
+/**
+ * The first of the GM's entries that holds right now, as a directive. A switch lasts the battle, so once the unit plays
+ * by its profile every Switch AI Profile entry is passed over, and the entries below still give it movement.
+ * @param {object} unit The values directiveFacts in profile.mjs reads off the unit, including its current profile.
+ * @param {{round?: number|null}} [context] The encounter's round, which At Round entries read.
+ * @returns {import('./types.mjs').Directive|null} Null when the unit takes its normal turn.
+ */
 export function resolveDirective(unit, context = {}) {
-  const entries = conditionEntriesOf(unit);
-  for (const entry of entries) {
+  let switched = false;
+  for (const entry of conditionEntriesOf(unit)) {
     if (!isUsableEntry(entry)) continue;
     if (!conditionHolds(entry, unit, context)) continue;
+    if (entry.behavior === 'switchProfile' && (switched || entry.profile === unit.profile)) {
+      switched = true;
+      continue;
+    }
     return {
       behavior: entry.behavior,
       profile: entry.behavior === 'switchProfile' ? entry.profile : null,
@@ -124,15 +86,9 @@ export function resolveDirective(unit, context = {}) {
   return null;
 }
 
-/** The unit's authored conditions, followed by its terrain spawn behaviour as an extra Always entry. */
+/** The GM's conditions on the unit, followed by its terrain spawn behaviour as an extra Always entry. */
 function conditionEntriesOf(unit) {
   const authored = unit.conditions;
   const trailing = spawnConditionEntry(unit.spawnBehavior);
   return trailing ? [...authored, trailing] : authored;
-}
-
-/** The terrain spawn's behaviour as an Always condition entry, or null when it isn't a known behaviour. */
-export function spawnConditionEntry(spawn) {
-  if (!AI_BEHAVIOR_VALUES.includes(spawn)) return null;
-  return { target: 'self', type: 'always', behavior: spawn, profile: null, variable: 0, num: AI_ROUND_MIN };
 }

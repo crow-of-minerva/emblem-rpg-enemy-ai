@@ -1,4 +1,9 @@
 /** @layer enemy-ai */
+/*
+ * The module API, published on the module's `api` property at init: an encounter's Enemy AI mode, running and stopping
+ * an enemy phase, and the Set Combat AI on Selected window. It is published even when the system's API is too old for
+ * the rest of the module.
+ */
 import { API_VERSION } from './constants.mjs';
 import { CombatAI } from './combat-ai.mjs';
 import { cycleMode, isEnabled, modeOf, setMode } from './driver/mode.mjs';
@@ -11,9 +16,8 @@ import { openMassEditDialog } from './ui/mass-edit.mjs';
 /*  The published API                           */
 /* -------------------------------------------- */
 /**
- * The frozen module API, which `onInit` in `foundry/hooks.mjs` publishes at
- * game.modules.get('emblem-rpg-enemy-ai').api. The system's "Configure Combat AI" macro calls `openMassEdit`, the
- * multi-actor AI editor in `ui/mass-edit.mjs`.
+ * The frozen module API, published at game.modules.get('emblem-rpg-enemy-ai').api during init. The system's Configure
+ * Combat AI macro opens Set Combat AI on Selected through `openMassEdit`.
  */
 export function createEnemyAiApi() {
   return Object.freeze({

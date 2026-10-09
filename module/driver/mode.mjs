@@ -1,8 +1,12 @@
 /** @layer driver */
+/*
+ * An encounter's Enemy AI mode (off, on for the next enemy phase, or locked on), saved as a flag on its Combat, and how
+ * that mode is kept on the Scene while the battle is paused.
+ */
 import { AI_MODES } from '../constants.mjs';
+import { documentByUuid } from '../foundry/documents.mjs';
 import {
   clearPausedMode,
-  documentByUuid,
   readCombatMode,
   readPausedMode,
   writeCombatMode,
@@ -40,7 +44,7 @@ export function setMode(combat, mode) {
   return writeCombatMode(combat, mode);
 }
 
-/** Step the mode on: off, on for one round, locked on. */
+/** Step the mode on, as one press of the tracker switch does: off, on for the next enemy phase, locked on, off. */
 export function cycleMode(combat) {
   const next = AI_MODES[(AI_MODES.indexOf(modeOf(combat)) + 1) % AI_MODES.length];
   return setMode(combat, next);
@@ -50,12 +54,12 @@ export function cycleMode(combat) {
 /*  Across a pause                              */
 /* -------------------------------------------- */
 /**
- * The mode each Combat had when a pause deleted it, by Scene uuid, held on this page until the pause commits. The
+ * The mode each Combat had when a pause deleted it, by Scene uuid, held on this client until the pause commits. The
  * pause deletes the Combat and its mode flag with it, and the resume creates a new Combat.
  */
 const pausingModes = new Map();
 
-/** Note the mode on a Combat a pause is deleting. `foundry/hooks.mjs` calls this from `deleteCombat`. */
+/** Note the mode on a Combat a pause is deleting, from the `deleteCombat` hook. */
 export function notePausingMode(combat) {
   const sceneUuid = String(combat?.scene?.uuid ?? '');
   if (sceneUuid) pausingModes.set(sceneUuid, modeOf(combat));

@@ -1,12 +1,10 @@
 /** @layer driver */
-import {
-  EXECUTION_TIMING,
-  IDLE_TURN_YIELD_MS,
-  LOG,
-  MANUAL_POLL_MS,
-  UNIT_HANDOFF_DELAY_MS
-} from '../constants.mjs';
-import { startedEncounterSceneUuids } from '../foundry/flags.mjs';
+/*
+ * Playing the enemy phase on the host client. A run takes the system's execution segment, its exclusive right to run
+ * the system's commands, and the board hold, a movement lock that stops everyone moving tokens by hand.
+ */
+import { LOG } from '../constants.mjs';
+import { startedEncounterSceneUuids } from '../foundry/documents.mjs';
 import {
   commandHostStatus,
   encounterState,
@@ -15,51 +13,94 @@ import {
   isCommandHost,
   releaseBoard,
   reportStandDown,
-  systemHostStates,
   systemIntegrated,
+  systemLifecycleStates,
+  systemPhases,
   systemResultCodes
 } from '../foundry/system-bridge.mjs';
 import { board, unitByTokenUuid } from '../planner/board.mjs';
-import { invalidateBoardMemo } from '../planner/memo.mjs';
 import { orderForPhase, triage, yieldsToPendingAlly } from '../planner/phase-roster.mjs';
 import { isManual, partitionManual, profileOf } from '../planner/profile.mjs';
+import { isAlive } from '../planner/readiness.mjs';
 import { collectUnits, isEligibleUnit } from '../planner/roster.mjs';
 import { awaitMarkWrites } from './aggression.mjs';
 import { encounterOf, isEnabled } from './mode.mjs';
 import { awaitSettled, delay } from './pacing.mjs';
 import { ExecutionSegmentRunner, HALT_REASONS, isDriveHalted } from './segment.mjs';
 import {
-  DRIVER,
+  abortOnSystemStop,
   abortWanted,
+  activeRun,
   attachAbortKey,
   beginRun,
   detachAbortKey,
+  drivesEncounter,
   endRun,
+  holdsBoard,
+  isRunning,
+  joinResumeCheck,
+  markBoardHeld,
+  markBoardReleased,
   markPhaseRan,
-  phaseWasRun
+  markResumeOffered,
+  phaseWasRun,
+  resumeWasOffered
 } from './state.mjs';
 import { markStopped, phaseKey, phaseStopped } from './stop-mark.mjs';
-import { endTurn, recoverFailedUnit, takeTurn } from './turn.mjs';
+import { EXECUTION_TIMING, IDLE_TURN_YIELD_MS, MANUAL_POLL_MS, UNIT_HANDOFF_DELAY_MS } from './timing.mjs';
+import { SWITCHED_TO_MANUAL, clearMarkIfTurnEnded, endTurn, recoverFailedUnit, takeTurn } from './turn.mjs';
 
 /* -------------------------------------------- */
 /*  One run                                     */
 /* -------------------------------------------- */
-/** One enemy phase as the AI plays it: its queue, the units that failed, its execution segment, and how it ended. */
+/**
+ * Why a run stopped before playing its whole queue. A stop inside one of the system's actions is not listed here: the
+ * execution segment keeps it as its `halt`, with one of the `HALT_REASONS`.
+ */
+export const RUN_STOPS = Object.freeze({
+  /** The GM pressed Space twice, or a GM asked the system to stop the AI. */
+  ABORTED: 'aborted',
+  /** The map was still busy with animations or saves when the wait before a turn ran out. */
+  STALLED: 'stalled',
+  /**
+   * The run is no longer wanted: the AI was switched off, the phase moved on, this client stopped being the host
+   * client, or the host client is still starting up.
+   */
+  STOOD_DOWN: 'stood-down',
+  /** The system refused the board hold that locks manual movement. */
+  HOLD_REFUSED: 'hold-refused',
+  /** An earlier run on this client left its board hold in place, and it still could not be released. */
+  LEFTOVER_HOLD: 'leftover-hold',
+  /** The board hold or the execution segment could not be given up for a Manual unit's turn. */
+  HANDOFF_FAILED: 'handoff-failed',
+  /** The system refused the execution segment as the phase began. */
+  ACQUIRE_REFUSED: 'acquire-refused',
+  /** The system refused the execution segment back after a Manual unit's turn. */
+  REACQUIRE_REFUSED: 'reacquire-refused'
+});
+
+/**
+ * One enemy phase as the AI plays it: its queue, the units that failed, its execution segment, why it stopped, and
+ * what its teardown could not undo.
+ */
 class PhaseRun {
   constructor(state) {
     this.summary = [];
     this.failed = [];
     this.queue = [];
-    this.aborted = false;
-    this.stalled = false;
-    this.standDown = false;
+    /** Why the run stopped, one of {@link RUN_STOPS}, or null while it may go on. */
+    this.stop = null;
+    /** The system's result code when it refused the execution segment, else ''. */
+    this.stopCode = '';
+    /**
+     * The host client refused the execution segment because it is still starting up. The phase does not count as run,
+     * so the resume check can offer it to the GM.
+     */
     this.recovering = false;
-    this.holdRefused = false;
+    /** Set by the teardown when the board hold could not be released. */
     this.releaseFailed = false;
-    this.handoffFailed = false;
+    /** Set by the teardown when the execution segment could not be closed. */
     this.closeFailed = false;
-    this.acquireRefused = '';
-    this.reacquireRefused = '';
     this.haltedUnit = '';
     this.segment = null;
     this.cameraOn = false;
@@ -75,11 +116,20 @@ class PhaseRun {
     return this.segment.actions;
   }
 
-  /** Whether the roster may be read and played at all. */
+  /**
+   * Record why the run stops. The first stop wins, so a later check cannot replace the reason the GM is told.
+   * @param {string} reason One of {@link RUN_STOPS}.
+   * @param {string} [code] The system's result code, when it refused the execution segment.
+   */
+  stopWith(reason, code = '') {
+    if (this.stop) return;
+    this.stop = reason;
+    this.stopCode = code;
+  }
+
+  /** Whether the run may no longer read or play the roster: it stopped, or the segment halted an action. */
   get blocked() {
-    return this.aborted || this.stalled || this.standDown
-      || this.holdRefused || this.releaseFailed || this.handoffFailed
-      || Boolean(this.acquireRefused || this.reacquireRefused || this.segment.halt);
+    return this.stop !== null || Boolean(this.segment.halt);
   }
 
   /**
@@ -93,45 +143,50 @@ class PhaseRun {
 }
 
 /* -------------------------------------------- */
-/*  The phase driver                            */
+/*  Playing the phase                           */
 /* -------------------------------------------- */
 /**
- * Play the whole enemy phase on one Scene, one unit at a time, inside one execution segment on the host client. The
- * Scene is the one named, else the planner's own, else the only started encounter's, never simply the Scene the host
- * is viewing. Runs when the enemy phase begins, or when the AI is switched on during it.
- * @param {object} planner The planner the caller holds, rebound here to the encounter's own Scene.
+ * On the host client, when the enemy phase begins or the AI is switched on during it, play the whole phase on one
+ * Scene, one unit at a time. The Scene is the one named, else the only started encounter's, never simply the Scene
+ * the host client is showing.
+ * @param {import('../planner/scene.mjs').ScenePlanners} planners Every Scene's planner; the run takes its Scene's.
  * @param {{sceneUuid?: string}} [intent] The encounter's Scene.
  * @returns {Promise<object[]>} What each unit did.
  */
-export async function runEnemyPhase(planner, intent = {}) {
+export async function runEnemyPhase(planners, intent = {}) {
   if (!systemIntegrated()) {
     reportStandDown();
     return [];
   }
   if (!isCommandHost()) return [];
-  if (DRIVER.running) return [];
+  if (isRunning()) return [];
   const named = String(intent?.sceneUuid ?? '');
-  const state = encounterState(named || planner.sceneUuid || soleEncounterSceneUuid());
-  if (!state?.sceneUuid || !state.combatUuid || state.started !== true || state.phase !== 'Enemy') return [];
+  const state = encounterState(named || soleEncounterSceneUuid());
+  if (!state?.sceneUuid || !state.combatUuid || state.started !== true
+    || state.phase !== systemPhases().ENEMY) return [];
   if (phaseStopped(state)) {
     globalThis.ui?.notifications?.warn('Enemy AI stopped this phase after an uncertain result. '
       + 'Run the remaining units manually.');
     return [];
   }
-  return drivePhase(planner.forScene(state.sceneUuid), state);
+  return drivePhase(planners, state);
 }
 
-/** The run itself, on a planner bound to the encounter's Scene. */
-async function drivePhase(planner, state) {
+/**
+ * The run itself, on the planner of the encounter's Scene. When the host client refused the run because it is still
+ * starting up, the resume check takes over once the run has ended, and offers the phase to the GM once the host is
+ * ready.
+ */
+async function drivePhase(planners, state) {
+  const planner = planners.forScene(state.sceneUuid);
   if (board(planner)?.exploration === true) return [];
-  invalidateBoardMemo();
   const run = new PhaseRun(state);
   run.segment = new ExecutionSegmentRunner();
   beginRun(run);
   try {
-    if (DRIVER.holdingBoard && !await releaseTheBoard()) {
-      run.releaseFailed = true;
-      run.holdRefused = true;
+    // A board hold this client could not release after an earlier run. The teardown tries the release once more.
+    if (holdsBoard() && !await releaseTheBoard()) {
+      run.stopWith(RUN_STOPS.LEFTOVER_HOLD);
       return [];
     }
     await preparePhase(planner, run);
@@ -139,13 +194,16 @@ async function drivePhase(planner, state) {
   } catch (error) {
     if (!isDriveHalted(error)) {
       console.error(`${LOG} the enemy phase failed.`, error);
-      globalThis.ui?.notifications?.error('Enemy AI failed. Run the remaining units manually!');
+      globalThis.ui?.notifications?.error('Enemy AI ran into an error. Run the remaining units manually.');
     }
   } finally {
     if (!run.recovering) markPhaseRan(phaseKey(run));
     await teardownPhase(planner, run);
     if (run.uncertain) await markStopped(run);
     reportPhase(planner, run);
+    if (run.recovering) {
+      resumeAfterReload(planners).catch(error => console.error(`${LOG} the resume check failed.`, error));
+    }
   }
   return run.summary;
 }
@@ -155,23 +213,18 @@ async function drivePhase(planner, state) {
  * saved. Then end the turns of idle units and put the rest in acting order.
  */
 async function preparePhase(planner, run) {
-  if (!await awaitSettled({ label: 'the enemy phase' })) run.stalled = true;
-  if (!phaseStillCurrent(run)) {
-    run.standDown = true;
-    return;
-  }
-  if (run.blocked) return;
+  const settled = await awaitSettled({ label: 'the enemy phase' });
+  if (stopIfAborted(run)) return;
+  if (!settled) run.stopWith(RUN_STOPS.STALLED);
+  if (!stillCurrent(run) || run.blocked) return;
   if (!await openSegment(planner, run)) return;
   if (!await takeTheBoard()) {
-    run.holdRefused = true;
+    run.stopWith(RUN_STOPS.HOLD_REFUSED);
     return;
   }
   await awaitMarkWrites();
-  if (abortWanted()) run.aborted = true;
-  if (!phaseStillCurrent(run)) {
-    run.standDown = true;
-    return;
-  }
+  stopIfAborted(run);
+  if (!stillCurrent(run)) return;
   const roster = run.blocked ? { driven: [], manual: [] } : partitionManual(collectUnits(planner));
   const { acting, idle } = run.blocked ? { acting: [], idle: [] } : triage(planner, roster.driven);
   await endIdleTurns(run, idle);
@@ -181,14 +234,8 @@ async function preparePhase(planner, run) {
 /** End the turns of units that have nothing to do as the phase starts. */
 async function endIdleTurns(run, idle) {
   for (const unit of idle) {
-    if (!phaseStillCurrent(run)) {
-      run.standDown = true;
-      break;
-    }
-    if (abortWanted()) {
-      run.aborted = true;
-      break;
-    }
+    if (!stillCurrent(run)) break;
+    if (stopIfAborted(run)) break;
     const live = unitByTokenUuid(unit.tokenUuid);
     if (!live || live.turn?.turnComplete === true) continue;
     try {
@@ -196,7 +243,7 @@ async function endIdleTurns(run, idle) {
       run.idled += 1;
     } catch (error) {
       if (isDriveHalted(error)) {
-        noteHalt(run, unit, error);
+        noteHalt(run, unit);
         break;
       }
       console.error(`${LOG} could not end ${unit.name}'s turn.`, error);
@@ -206,8 +253,10 @@ async function endIdleTurns(run, idle) {
 }
 
 /**
- * Play the queue one unit at a time, with the camera on and a wait for a quiet map before every turn. A unit that
- * should let a pending ally move first (`yieldsToPendingAlly`) goes to the back of the queue, once per phase.
+ * Play the queue one unit at a time, with the camera on and a wait for a quiet map before every turn; a unit leaves
+ * the queue only once its turn may start, so a stop before then still counts it as left to play. A unit that should
+ * let a pending ally move first goes to the back once per phase, and a Manual unit pauses the run at its place, as
+ * does one a Switch AI Profile condition makes Manual in its turn.
  */
 async function runQueue(planner, run) {
   if (!run.queue.length) return;
@@ -215,13 +264,9 @@ async function runQueue(planner, run) {
   await camera('begin');
   const stoodAside = new Set();
   while (run.queue.length) {
-    const queued = run.queue.shift();
-    if (abortWanted()) {
-      run.aborted = true;
-      break;
-    }
-    if (!await readyForTurn(run, queued)) break;
-    const unit = unitByTokenUuid(queued.tokenUuid);
+    if (stopIfAborted(run)) break;
+    if (!await readyForTurn(run, run.queue[0])) break;
+    const unit = unitByTokenUuid(run.queue.shift().tokenUuid);
     if (!unit || unit.turn?.turnComplete === true || !isEligibleUnit(unit)) continue;
     if (isManual(unit)) {
       if (!await holdForManual(planner, run, unit)) break;
@@ -232,8 +277,9 @@ async function runQueue(planner, run) {
       run.queue.push(unit);
       continue;
     }
-    await playUnit(planner, run, unit);
+    const handedOver = await playUnit(planner, run, unit);
     if (run.blocked) break;
+    if (handedOver && !await holdForManual(planner, run, unit)) break;
   }
 }
 
@@ -244,28 +290,26 @@ async function runQueue(planner, run) {
 async function readyForTurn(run, unit) {
   const settled = await awaitSettled({ label: `${unit.name}'s turn` });
   await awaitMarkWrites();
-  if (abortWanted()) {
-    run.aborted = true;
-    return false;
-  }
+  if (stopIfAborted(run)) return false;
   if (!settled) {
-    run.stalled = true;
+    run.stopWith(RUN_STOPS.STALLED);
     return false;
   }
-  return phaseStillCurrent(run);
+  return stillCurrent(run);
 }
 
-/** Play one unit's turn. An error is logged and the run moves on to the next unit, but a halt stops the whole run. */
+/**
+ * Play one unit's turn. An error is logged and the run moves on to the next unit, but a halt stops the whole run.
+ * @returns {Promise<boolean>} Whether a Switch AI Profile condition made the unit Manual, leaving its turn to the GM.
+ */
 async function playUnit(planner, run, unit) {
   if (!await holdBoard({ label: 'Enemy Phase', tokenName: unit.name, tokenImg: unit.img })) {
-    run.holdRefused = true;
-    return;
+    run.stopWith(RUN_STOPS.HOLD_REFUSED);
+    return false;
   }
-  if (!phaseStillCurrent(run)) {
-    run.standDown = true;
-    return;
-  }
+  if (!stillCurrent(run)) return false;
   let engaged = false;
+  let handedOver = false;
   const onEngage = async () => {
     engaged = true;
     await camera('focus', unit.tokenUuid);
@@ -273,11 +317,15 @@ async function playUnit(planner, run, unit) {
   try {
     const result = await takeTurn(planner, unit, { onEngage, actions: run.gameplay });
     run.summary.push({ name: unit.name, profile: profileOf(unit), ...result });
+    handedOver = result.reason === SWITCHED_TO_MANUAL;
   } catch (error) {
     if (isDriveHalted(error)) {
-      noteHalt(run, unit, error);
+      noteHalt(run, unit);
       run.summary.push({ name: unit.name, acted: false, didSomething: engaged, reason: `halted-${error.reason}` });
-      return;
+      // A stop during the unit's last action halts before its end turn, so its spent turn would keep the mark.
+      await clearMarkIfTurnEnded(unit)
+        .catch(markError => console.warn(`${LOG} could not clear ${unit.name}'s aggression mark.`, markError));
+      return false;
     }
     console.error(`${LOG} ${unit.name} failed its turn; continuing.`, error);
     run.failed.push(unit.name);
@@ -285,13 +333,14 @@ async function playUnit(planner, run, unit) {
     await recoverFailedUnit(unit, run.gameplay);
   }
   if (run.segment.halt) {
-    noteHalt(run, unit, null);
-    return;
+    noteHalt(run, unit);
+    return false;
   }
   const drained = await awaitSettled({ label: `the turn after ${unit.name}` });
-  if (abortWanted()) run.aborted = true;
-  else if (!drained) run.stalled = true;
+  if (stopIfAborted(run)) return false;
+  if (!drained) run.stopWith(RUN_STOPS.STALLED);
   else if (engaged) await delay(UNIT_HANDOFF_DELAY_MS);
+  return handedOver;
 }
 
 /* -------------------------------------------- */
@@ -304,47 +353,43 @@ async function playUnit(planner, run, unit) {
 async function holdForManual(planner, run, unit) {
   await camera('focus', unit.tokenUuid);
   if (!await releaseTheBoard() || !await run.segment.release()) {
-    run.releaseFailed = true;
-    run.handoffFailed = true;
+    run.stopWith(RUN_STOPS.HANDOFF_FAILED);
     return false;
   }
   if (!await awaitManualTurns(planner, [unit], run)) return false;
-  if (!phaseStillCurrent(run)) return false;
+  if (!stillCurrent(run)) return false;
   if (!await reacquireSegment(planner, run)) return false;
   if (!await takeTheBoard()) {
-    run.holdRefused = true;
+    run.stopWith(RUN_STOPS.HOLD_REFUSED);
     return false;
   }
-  if (!await awaitSettled({ label: `${unit.name}'s manual turn` })) {
-    run.stalled = true;
+  const settled = await awaitSettled({ label: `${unit.name}'s manual turn` });
+  if (stopIfAborted(run)) return false;
+  if (!settled) {
+    run.stopWith(RUN_STOPS.STALLED);
     return false;
   }
-  if (abortWanted()) {
-    run.aborted = true;
-    return false;
-  }
-  return phaseStillCurrent(run);
+  return stillCurrent(run);
 }
 
 /** Wait while the GM plays units by hand, re-reading the map on a short timer until their turns end. */
 async function awaitManualTurns(planner, units, run) {
   const pending = () => units
     .map(entry => unitByTokenUuid(entry.tokenUuid))
-    .filter(live => live && (Number(live.hp) || 0) > 0 && live.turn?.turnComplete !== true);
+    .filter(live => live && isAlive(live) && live.turn?.turnComplete !== true);
   let waiting = pending();
   if (!waiting.length) return true;
   const names = waiting.map(entry => entry.name).join(', ');
   const plural = waiting.length > 1 ? 'their turns' : 'its turn';
-  globalThis.ui?.notifications?.info(`Enemy AI is holding for ${names}. End ${plural} to continue.`);
+  globalThis.ui?.notifications?.info(`Enemy AI is waiting for ${names}. End ${plural} to continue.`);
   while (waiting.length) {
     await delay(MANUAL_POLL_MS);
-    invalidateBoardMemo();
-    if (abortWanted()) {
-      run.aborted = true;
+    if (stopIfAborted(run)) return false;
+    if (!isEnabled(encounterOf(planner))) {
+      run.stopWith(RUN_STOPS.STOOD_DOWN);
       return false;
     }
-    if (!isEnabled(encounterOf(planner))) return false;
-    if (!phaseStillCurrent(run)) return false;
+    if (!stillCurrent(run)) return false;
     waiting = pending();
   }
   return true;
@@ -354,23 +399,22 @@ async function awaitManualTurns(planner, units, run) {
 /*  Board hold and execution segment            */
 /* -------------------------------------------- */
 /**
- * Take the system's driven-board hold and start listening for the double-Space abort. The hold is a world setting: it
- * shows a banner, blocks manual movement for everyone, and survives a reload. `DRIVER.holdingBoard` is only this
- * page's memory of having taken it. Does nothing when this page already holds it.
+ * Take the system's board hold and start listening for the double-Space abort. The hold is a world setting that
+ * survives a reload, while `holdsBoard()` is only this client's memory of having taken it.
  */
 async function takeTheBoard() {
-  if (DRIVER.holdingBoard) return true;
+  if (holdsBoard()) return true;
   if (!await holdBoard({ label: 'Enemy Phase' })) return false;
-  DRIVER.holdingBoard = true;
+  markBoardHeld();
   attachAbortKey();
   return true;
 }
 
 /** Release the board hold, for a manual unit's turn or at the end of the run, and stop listening for the abort key. */
 async function releaseTheBoard() {
-  if (!DRIVER.holdingBoard) return true;
+  if (!holdsBoard()) return true;
   if (await releaseBoard() !== true) return false;
-  DRIVER.holdingBoard = false;
+  markBoardReleased();
   detachAbortKey();
   return true;
 }
@@ -380,17 +424,19 @@ function runStillWanted(planner, run) {
   return !abortWanted() && isEnabled(encounterOf(planner)) && phaseStillCurrent(run);
 }
 
-/** Open the run's execution segment, waiting only while the run is still wanted. */
+/**
+ * Open the run's execution segment, waiting only while the run is still wanted. A refusal because the host client is
+ * still starting up stops the run without a notice and marks it `recovering`.
+ */
 async function openSegment(planner, run) {
   const result = await run.segment.open({ revalidate: () => runStillWanted(planner, run) });
   if (result?.ok === true) return true;
   if (result?.code === systemResultCodes().RECOVERY_STARTING) {
-    run.standDown = true;
+    run.stopWith(RUN_STOPS.STOOD_DOWN);
     run.recovering = true;
-    resumeAfterReload(planner).catch(error => console.error(`${LOG} the resume check failed.`, error));
     return false;
   }
-  noteRefusal(planner, run, result, 'acquireRefused');
+  noteRefusal(planner, run, result, RUN_STOPS.ACQUIRE_REFUSED);
   return false;
 }
 
@@ -398,24 +444,29 @@ async function openSegment(planner, run) {
 async function reacquireSegment(planner, run) {
   const result = await run.segment.reacquire({ revalidate: () => runStillWanted(planner, run) });
   if (result?.ok === true) return true;
-  noteRefusal(planner, run, result, 'reacquireRefused');
+  noteRefusal(planner, run, result, RUN_STOPS.REACQUIRE_REFUSED);
   return false;
 }
 
-/** Record why the segment was not taken: an abort, a run no longer wanted, or a refusal the GM is told about. */
-function noteRefusal(planner, run, result, field) {
-  if (abortWanted()) run.aborted = true;
-  else if (!isEnabled(encounterOf(planner)) || !phaseStillCurrent(run)) run.standDown = true;
-  else run[field] = String(result?.code ?? 'unknown');
+/**
+ * Record why the segment was not taken: an abort, a run no longer wanted, or a refusal the GM is told about.
+ * @param {string} reason The stop for a refusal: `RUN_STOPS.ACQUIRE_REFUSED` or `RUN_STOPS.REACQUIRE_REFUSED`.
+ */
+function noteRefusal(planner, run, result, reason) {
+  if (stopIfAborted(run)) return;
+  if (!isEnabled(encounterOf(planner)) || !phaseStillCurrent(run)) run.stopWith(RUN_STOPS.STOOD_DOWN);
+  else run.stopWith(reason, String(result?.code ?? 'unknown'));
 }
 
-/** Record which unit's turn a stop interrupted, and whether it was an abort, from this client or asked for by a GM. */
-function noteHalt(run, unit, error) {
+/**
+ * Record which unit's turn the segment's halt interrupted. A halt for a stop request counts as an abort, and one asked
+ * for by a GM through the system switches the AI off here.
+ */
+function noteHalt(run, unit) {
   run.haltedUnit ||= unit.name ?? '';
-  if (error?.reason !== HALT_REASONS.ABORT) return;
-  run.aborted = true;
-  // Called for its side effect: a stop asked for through the system also switches the AI off here.
-  abortWanted();
+  if (run.segment.halt?.reason !== HALT_REASONS.ABORT) return;
+  abortOnSystemStop();
+  run.stopWith(RUN_STOPS.ABORTED);
 }
 
 /**
@@ -465,6 +516,34 @@ function phaseStillCurrent(run) {
     && state.phase === run.phase && (state.round ?? null) === run.round;
 }
 
+/**
+ * Whether this client is playing the encounter's phase and that phase is still under way. A run still finishing after
+ * the phase moved on stands down by itself before its next action, so it needs no stop request.
+ * @param {string} combatUuid The encounter asked about.
+ * @returns {boolean}
+ */
+export function playsCurrentPhase(combatUuid) {
+  return drivesEncounter(combatUuid) && phaseStillCurrent(activeRun());
+}
+
+/** Whether the run's phase is still current. When it is not, the run stops as no longer wanted. */
+function stillCurrent(run) {
+  if (phaseStillCurrent(run)) return true;
+  run.stopWith(RUN_STOPS.STOOD_DOWN);
+  return false;
+}
+
+/**
+ * Stop the run when a stop has been asked for, and say whether it did. A stop asked for by a GM through the system
+ * also switches the AI off here, as the double-Space abort does.
+ */
+function stopIfAborted(run) {
+  if (!abortWanted()) return false;
+  abortOnSystemStop();
+  run.stopWith(RUN_STOPS.ABORTED);
+  return true;
+}
+
 /** The Scene of the one started encounter, read off the Combat documents, or '' when there is none or several. */
 function soleEncounterSceneUuid() {
   const scenes = startedEncounterSceneUuids();
@@ -474,49 +553,91 @@ function soleEncounterSceneUuid() {
 /* -------------------------------------------- */
 /*  Reporting                                   */
 /* -------------------------------------------- */
-/** Tell the GM what the run left behind: the abort, the stall, the units that failed and the manual units. */
+/** Show the GM what the run left behind, and log the system's code when it refused the execution segment. */
 function reportPhase(planner, run) {
   const notify = globalThis.ui?.notifications;
-  const halt = run.segment.halt;
-  if (run.releaseFailed) notify?.warn('Enemy AI could not release the board. Retry after restoring GM control.');
+  if (run.stopCode) console.warn(`${LOG} the system refused the execution segment with code ${run.stopCode}.`);
+  const pendingManual = run.blocked ? 0 : pendingManualCount(planner);
+  for (const { level, text } of phaseNotices(run, pendingManual)) notify?.[level](text);
+  if (run.idled) console.debug(`${LOG} ${run.idled} unit(s) had nothing to do; turns ended without processing.`);
+}
+
+/** The sentence that ends most stop notices. */
+const RUN_THE_REST = 'Run the remaining units manually.';
+
+/**
+ * The notices for a finished run, in the order they are shown: at most one saying why the run stopped, the units
+ * that failed, the Manual units still to play, then each thing the teardown could not undo.
+ * @param {PhaseRun} run The finished run.
+ * @param {number} pendingManual How many Manual units still have a turn to take. Shown only when the run did not stop.
+ * @returns {{level: string, text: string}[]} Each notice's level (`info`, `warn` or `error`) and its text.
+ */
+export function phaseNotices(run, pendingManual) {
+  const notices = [];
+  const stop = stopNotice(run);
+  if (stop) notices.push(stop);
+  const failed = run.failed.length;
+  if (failed) {
+    const names = run.failed.join(', ');
+    notices.push({ level: 'warn', text: `${names} failed to act. Run ${failed > 1 ? 'them' : 'it'} manually.` });
+  }
+  if (pendingManual > 0 && run.stop === null && !run.segment.halt) {
+    const which = pendingManual > 1 ? `${pendingManual} units are` : '1 unit is';
+    const turns = pendingManual > 1 ? 'their turns' : 'its turn';
+    notices.push({ level: 'info', text: `${which} set to Manual. Play ${turns} yourself to finish the phase.` });
+  }
+  if (run.releaseFailed) {
+    notices.push({ level: 'warn', text: 'Enemy AI could not unlock movement on the map. '
+      + 'Reload this client if tokens still cannot move.' });
+  }
   if (run.closeFailed) {
-    notify?.error('Enemy AI could not hand world execution back. Reload this client if play stays blocked.');
+    notices.push({ level: 'error', text: 'Enemy AI could not give control back to the table. '
+      + 'Reload this client if play stays blocked.' });
   }
-  if (run.holdRefused) notify?.warn('Enemy AI could not hold the board. Run the remaining units manually.');
-  if (run.acquireRefused) {
-    notify?.warn(`Enemy AI could not take the board: ${refusalReason(run.acquireRefused)}. `
-      + 'Run the remaining units manually.');
-  }
-  if (run.reacquireRefused) {
-    const reason = refusalReason(run.reacquireRefused);
-    notify?.warn(`Enemy AI could not take the board back after a manual turn: ${reason}. `
-      + 'Run the remaining units manually.');
-  }
+  return notices;
+}
+
+/**
+ * The one notice that says why the run stopped, or null when it needs none, as when the run was no longer wanted. A
+ * halt inside an action is reported before a stop reason.
+ */
+function stopNotice(run) {
+  const halt = run.segment.halt;
+  const unit = run.haltedUnit || 'the acting unit';
   if (halt?.reason === HALT_REASONS.UNKNOWN) {
-    const unit = run.haltedUnit || 'the acting unit';
-    notify?.warn(`Enemy AI stopped: the result of ${unit}'s last action is not known. `
-      + `Check ${unit}, then run the remaining units manually.`);
-  } else if (halt && halt.reason !== HALT_REASONS.ABORT) {
-    notify?.warn('Enemy AI stopped: this client no longer holds command execution. '
-      + 'Run the remaining units manually.');
+    return { level: 'warn', text: `Enemy AI stopped: the result of ${unit}'s last action is not known. `
+      + `Check ${unit}, then run the remaining units manually.` };
   }
-  if (run.handoffFailed && !run.releaseFailed) {
-    notify?.warn('Enemy AI stopped after a failed manual hand-off. Run the remaining units manually.');
+  if (halt?.reason === HALT_REASONS.AUTHORITY) {
+    return { level: 'warn', text: `Enemy AI stopped: this client is no longer the host client. ${RUN_THE_REST}` };
   }
   if (halt?.reason === HALT_REASONS.ABORT && run.haltedUnit) {
-    notify?.info(`Enemy AI stopped after ${run.haltedUnit}'s last action. Finish its turn, `
-      + 'then run any remaining units manually.');
-  } else if (run.aborted && run.queue.length) notify?.info('Enemy AI aborted. Run the remaining units manually.');
-  else if (run.stalled) notify?.warn('Enemy AI stopped: the board never settled. Run the remaining units manually.');
-  if (run.failed.length) {
-    notify?.warn(`${run.failed.join(', ')} failed to act. Run ${run.failed.length > 1 ? 'them' : 'it'} manually.`);
+    return { level: 'info', text: `Enemy AI stopped after ${unit}'s last action. Finish its turn, `
+      + 'then run any remaining units manually.' };
   }
-  const pending = pendingManualCount(planner);
-  if (pending && !run.blocked) {
-    const plural = pending > 1 ? 's are' : ' is';
-    notify?.info(`${pending} unit${plural} set to Manual. Run ${pending > 1 ? 'them' : 'it'} yourself to end it.`);
+  if (halt && halt.reason !== HALT_REASONS.ABORT) {
+    return { level: 'warn', text: `Enemy AI stopped: it lost control of the table. ${RUN_THE_REST}` };
   }
-  if (run.idled) console.debug(`${LOG} ${run.idled} unit(s) had nothing to do; turns ended without processing.`);
+  switch (run.stop) {
+    case RUN_STOPS.ABORTED:
+      return run.queue.length ? { level: 'info', text: `Enemy AI aborted. ${RUN_THE_REST}` } : null;
+    case RUN_STOPS.STALLED:
+      return { level: 'warn', text: `Enemy AI stopped: the map was still busy after a long wait. ${RUN_THE_REST}` };
+    case RUN_STOPS.HOLD_REFUSED:
+      return { level: 'warn', text: `Enemy AI could not lock movement on the map. ${RUN_THE_REST}` };
+    case RUN_STOPS.LEFTOVER_HOLD:
+      return { level: 'warn', text: 'Enemy AI could not remove the movement lock left by its last run. '
+        + RUN_THE_REST };
+    case RUN_STOPS.HANDOFF_FAILED:
+      return { level: 'warn', text: `Enemy AI could not pause for a Manual unit's turn. ${RUN_THE_REST}` };
+    case RUN_STOPS.ACQUIRE_REFUSED:
+      return { level: 'warn', text: `Enemy AI could not start: ${refusalReason(run.stopCode)}. ${RUN_THE_REST}` };
+    case RUN_STOPS.REACQUIRE_REFUSED:
+      return { level: 'warn', text: 'Enemy AI could not carry on after a Manual unit\'s turn: '
+        + `${refusalReason(run.stopCode)}. ${RUN_THE_REST}` };
+    default:
+      return null;
+  }
 }
 
 /** Why the system refused the run its execution segment, in words the GM can act on. */
@@ -524,15 +645,14 @@ function refusalReason(code) {
   const codes = systemResultCodes();
   if (code === codes.COMMAND_EXECUTION_BUSY) return 'other gameplay is still running';
   if (code === codes.NO_ACTIVE_GM || code === codes.SOCKET_MULTIPLE_HOSTS) {
-    return 'this client is not the command host';
+    return 'this client is not the host client';
   }
-  return `the system refused (${code})`;
+  return 'the system refused it';
 }
 
 /** How many Manual units still have a turn to take, counted on the map as it stands now. */
 function pendingManualCount(planner) {
   try {
-    invalidateBoardMemo();
     return partitionManual(collectUnits(planner)).manual
       .filter(unit => unit.turn?.turnComplete !== true).length;
   } catch {
@@ -543,93 +663,88 @@ function pendingManualCount(planner) {
 /* -------------------------------------------- */
 /*  Picking an interrupted phase back up        */
 /* -------------------------------------------- */
+/** How the host client asks the GM whether to resume. Until hooks.mjs installs the dialog, the answer is no. */
+let askToResume = async () => false;
+
 /**
- * Once per host session and encounter, after the host has finished starting up, offer to resume an enemy phase a
- * reload interrupted. Phases this page ran itself are never offered; a run that stopped because the system was still
- * restoring an interrupted command doesn't count as run. Afterwards, release any board hold the reload left behind.
+ * Set the question the host client asks the GM before it resumes an enemy phase a reload interrupted.
+ * @param {(pendingCount: number) => Promise<boolean>} prompt Told how many units are still to act, resolves true
+ *   when the GM chooses to resume.
  */
-export function resumeAfterReload(planner) {
-  if (!isCommandHost()) return Promise.resolve(false);
-  DRIVER.resumeCheck ??= resumeWhenReady(planner)
-    .then(async resumed => {
-      await releaseLeftoverHold();
-      return resumed;
-    })
-    .finally(() => { DRIVER.resumeCheck = null; });
-  return DRIVER.resumeCheck;
+export function setResumePrompt(prompt) {
+  askToResume = prompt;
 }
 
 /**
- * The board hold is a world setting, so a reload mid-run leaves it standing. Once no run on this page is going,
+ * Once per host session and encounter, after the host client has finished starting up, offer to resume an enemy
+ * phase a reload interrupted, then release any board hold the reload left behind. A phase this client ran itself is
+ * never offered, and nothing happens while the module is switched off.
+ * @param {import('../planner/scene.mjs').ScenePlanners} planners Every Scene's planner.
+ * @returns {Promise<boolean>} Whether a phase was resumed.
+ */
+export function resumeAfterReload(planners) {
+  if (!isCommandHost() || !systemIntegrated()) return Promise.resolve(false);
+  return joinResumeCheck(() => resumeWhenReady(planners).then(async resumed => {
+    await releaseLeftoverHold();
+    return resumed;
+  }));
+}
+
+/**
+ * The board hold is a world setting, so a reload mid-run leaves it standing. Once no run on this client is going,
  * clear any hold this GM left behind so manual movement works again.
  */
 async function releaseLeftoverHold() {
-  if (DRIVER.running || !systemIntegrated() || !isCommandHost()) return;
+  if (isRunning() || !systemIntegrated() || !isCommandHost()) return;
   try {
-    if (await releaseBoard() === true) DRIVER.holdingBoard = false;
+    if (await releaseBoard() === true) markBoardReleased();
   } catch (error) {
     console.error(`${LOG} could not release a leftover board hold.`, error);
   }
 }
 
 /** The resume check: an encounter with the AI on, the host's readiness, then each started encounter's own Scene. */
-async function resumeWhenReady(planner) {
+async function resumeWhenReady(planners) {
   const enabledSomewhere = startedEncounterSceneUuids()
-    .some(sceneUuid => isEnabled(encounterOf(planner.forScene(sceneUuid))));
+    .some(sceneUuid => isEnabled(encounterOf(planners.forScene(sceneUuid))));
   if (!enabledSomewhere) return false;
   const status = await awaitHostReady();
   if (!status) return false;
   for (const sceneUuid of startedEncounterSceneUuids()) {
-    if (DRIVER.running) return false;
-    const answer = await offerResume(planner.forScene(sceneUuid), status);
+    if (isRunning()) return false;
+    const answer = await offerResume(planners, sceneUuid, status);
     if (answer !== null) return answer;
   }
   return false;
 }
 
-/** One encounter's resume offer, on a planner bound to its Scene, or null when it has nothing to offer. */
-async function offerResume(planner, status) {
+/** One encounter's resume offer, or null when it has nothing to offer. */
+async function offerResume(planners, sceneUuid, status) {
+  const planner = planners.forScene(sceneUuid);
   const state = encounterState(planner.sceneUuid);
-  if (state?.started !== true || state.phase !== 'Enemy' || !state.combatUuid) return null;
+  if (state?.started !== true || state.phase !== systemPhases().ENEMY || !state.combatUuid) return null;
   if (!isEnabled(encounterOf(planner))) return null;
   if (phaseStopped(state) || phaseWasRun(phaseKey(state))) return null;
   const offer = `${status.hostSession ?? ''}|${state.combatUuid}`;
-  if (DRIVER.resumeOffered.has(offer)) return null;
-  invalidateBoardMemo();
+  if (resumeWasOffered(offer)) return null;
   const pending = partitionManual(collectUnits(planner)).driven
     .filter(unit => unit.turn?.turnComplete !== true);
   if (!pending.length) return null;
-  DRIVER.resumeOffered.add(offer);
-  const plural = pending.length > 1 ? 's' : '';
-  const resumed = await confirmDialog({
-    window: { title: 'Enemy AI' },
-    content: `<p>The enemy phase was interrupted by a reload with ${pending.length} unit${plural} still to act. `
-      + 'Resume the Enemy AI?</p>',
-    rejectClose: false,
-    modal: true
-  });
-  if (resumed !== true) return false;
-  await runEnemyPhase(planner);
+  markResumeOffered(offer);
+  if (await askToResume(pending.length) !== true) return false;
+  await runEnemyPhase(planners, { sceneUuid: planner.sceneUuid });
   return true;
 }
 
-/**
- * The host's status once it has finished starting up, or null if this client stops being the host first. The API has
- * no list of startup states for `lifecycle`; its ready value is the same string as `protocol.hostStates.READY`.
- */
+/** The host's status once it has finished starting up, or null if this client stops being the host first. */
 async function awaitHostReady() {
   const { readinessPollMs, readinessTimeoutMs } = EXECUTION_TIMING;
   const attempts = Math.ceil(readinessTimeoutMs / readinessPollMs);
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (!isCommandHost()) return null;
     const status = await commandHostStatus();
-    if (status?.ok === true && status.data?.lifecycle === systemHostStates().READY) return status.data;
+    if (status?.ok === true && status.data?.lifecycle === systemLifecycleStates().READY) return status.data;
     if (attempt + 1 < attempts) await delay(readinessPollMs);
   }
   return null;
-}
-
-/** Ask the GM a yes-or-no question with Foundry's DialogV2.confirm. */
-function confirmDialog(options) {
-  return foundry.applications.api.DialogV2.confirm(options);
 }

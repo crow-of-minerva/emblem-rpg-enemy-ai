@@ -1,13 +1,15 @@
 /** @layer planner */
+/*
+ * Running the planner's stepped work, written as generators, straight through in one go.
+ */
 
 /* -------------------------------------------- */
-/*  Stepped work                                */
+/*  Running a plan in one go                    */
 /* -------------------------------------------- */
 /**
- * Run stepped planner work straight through and hand back its answer. The planner writes its long computations as
- * generators that yield between expensive calls. The drivers want the answer at once and drain them here, while
- * `ui/idle-steps.mjs` takes the same steps a few at a time. Draining runs in one go, so the page neither redraws nor
- * takes input until the plan is done.
+ * Run stepped planner work straight through and hand back its answer: the planner writes long computations as
+ * generators that yield between expensive calls. Draining runs in one go, so the browser neither redraws nor takes
+ * input until the plan is done.
  */
 export function drain(steps) {
   let step = steps.next();

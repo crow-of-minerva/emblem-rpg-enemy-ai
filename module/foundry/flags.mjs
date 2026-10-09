@@ -1,4 +1,8 @@
 /** @layer foundry */
+/*
+ * Reads and writes of the module's flags on Actors, Items, Combats and Scenes; each read checks the stored value before
+ * handing it on. A condition entry's saved shape is in module/condition-entries.mjs.
+ */
 import {
   ACTOR_FLAGS,
   AI_MODES,
@@ -8,63 +12,17 @@ import {
   COMBAT_FLAGS,
   ITEM_FLAGS,
   MODULE_ID,
-  SCENE_FLAGS,
-  SYSTEM_ID,
-  SYSTEM_SPAWN_BEHAVIOR_FLAG
+  SCENE_FLAGS
 } from '../constants.mjs';
-import { normalizeStoredConditionEntry, sanitizeConditionEntry, spawnConditionEntry } from '../planner/conditions.mjs';
-
-/* -------------------------------------------- */
-/*  Document lookup                             */
-/* -------------------------------------------- */
-/** The document a uuid names, or null. A uuid that fails to resolve also reads as null instead of throwing. */
-export function documentByUuid(uuid) {
-  if (!uuid) return null;
-  try {
-    return fromUuidSync(uuid) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** The Actor behind a placed Token uuid, or null. */
-export function actorOfToken(tokenUuid) {
-  const token = documentByUuid(tokenUuid);
-  return token?.documentName === 'Token' ? token.actor ?? null : null;
-}
-
-/** The uuid of a placed Token's Scene, read from the token uuid or else from the Token's parent, or ''. */
-export function sceneUuidOfToken(tokenUuid) {
-  const uuid = String(tokenUuid ?? '');
-  const named = /^(Scene\.[^.]+)\.Token\.[^.]+$/.exec(uuid)?.[1];
-  if (named) return named;
-  const token = documentByUuid(uuid);
-  return token?.documentName === 'Token' ? String(token.parent?.uuid ?? '') : '';
-}
-
-/** The uuid of an Actor's Scene: its own Token's for a synthetic Actor, else its first placed Token's, or ''. */
-export function sceneUuidOfActor(actor) {
-  const token = actor?.isToken ? actor.token : actor?.getDependentTokens?.()?.[0];
-  return String(token?.parent?.uuid ?? '');
-}
-
-/** The Scenes of every started encounter, read off the Combat documents rather than any client's view. */
-export function startedEncounterSceneUuids() {
-  const combats = globalThis.game?.combats;
-  const documents = combats?.contents ?? Array.from(combats ?? []);
-  const scenes = documents
-    .filter(combat => combat?.started === true)
-    .map(combat => String(combat.scene?.uuid ?? ''))
-    .filter(Boolean);
-  return [...new Set(scenes)];
-}
+import { conditionsWithSpawnEntry, normalizeStoredConditionEntry, spawnConditionEntry } from '../condition-entries.mjs';
+import { systemSpawnBehaviorOf } from './system-bridge.mjs';
 
 /* -------------------------------------------- */
 /*  Actor flags                                 */
 /* -------------------------------------------- */
 /**
- * The module's AI settings for one Actor. Once `adoptSpawnBehavior` has copied the spawn order into the conditions,
- * `spawnBehavior` reads blank, since the condition entry now carries it.
+ * The module's AI settings for one Actor, each field as the UnitAi typedef in planner/types.mjs describes it.
+ * `spawnBehavior` reads blank once `adoptSpawnBehavior` has copied the spawn order into the conditions.
  */
 export function readActorAi(actor) {
   const scope = actor?.flags?.[MODULE_ID] ?? {};
@@ -73,50 +31,46 @@ export function readActorAi(actor) {
   const priority = Number(scope[ACTOR_FLAGS.PRIORITY]);
   const conditions = Array.isArray(scope[ACTOR_FLAGS.CONDITIONS])
     ? scope[ACTOR_FLAGS.CONDITIONS].map(normalizeStoredConditionEntry) : [];
-  const spawn = spawnBehaviorOf(actor);
+  const spawn = systemSpawnBehaviorOf(actor);
+  const switched = scope[ACTOR_FLAGS.SWITCHED_PROFILE];
+  const markScene = scope[ACTOR_FLAGS.MARK_SCENE];
   return Object.freeze({
     profile,
     priority: Number.isFinite(priority) ? priority : AI_PRIORITY_DEFAULT,
     conditions: Object.freeze(conditions),
     wasAggressed: scope[ACTOR_FLAGS.WAS_AGGRESSED] === true,
+    switchedProfile: AI_PROFILE_VALUES.includes(switched) ? switched : '',
+    markScene: typeof markScene === 'string' ? markScene : '',
     spawnBehavior: scope[ACTOR_FLAGS.SPAWN_ADOPTED] === spawn ? '' : spawn
   });
 }
 
-/** The system's spawn-order flag on an Actor, as written by the terrain spawn that placed it. */
-function spawnBehaviorOf(actor) {
-  return String(actor?.flags?.[SYSTEM_ID]?.[SYSTEM_SPAWN_BEHAVIOR_FLAG] ?? '');
-}
-
-/** Whether an Actor update carries the system's spawn-order flag. */
-export function changesSpawnBehavior(changed) {
-  return changed.flags?.[SYSTEM_ID]?.[SYSTEM_SPAWN_BEHAVIOR_FLAG] !== undefined;
+/**
+ * Copy the terrain spawn's order into the Actor's conditions once, as a last Always entry the GM can edit or remove.
+ * Runs on the host client only, when the flag arrives on the Actor and when the Actor Control Panel draws its AI tab.
+ */
+export async function adoptSpawnBehavior(actor) {
+  const spawn = systemSpawnBehaviorOf(actor);
+  if (!spawnConditionEntry(spawn)) return false;
+  const ai = readActorAi(actor);
+  if (!ai.spawnBehavior) return false;
+  return writeActorAi(actor, { conditions: conditionsWithSpawnEntry(ai.conditions, spawn), spawnAdopted: spawn });
 }
 
 /**
- * Copy the terrain spawn's order into the Actor's conditions once, as a last Always entry the GM can edit or remove.
- * Runs when the flag arrives on the Actor, and when the Actor Control Panel draws its AI tab.
+ * Write one or more AI fields on an Actor, the conditions as a whole list; a `switchedProfile` or `markScene` of ''
+ * clears that field. Saving the GM's `profile` also clears a profile switch, so the new choice takes effect at once.
  */
-export async function adoptSpawnBehavior(actor) {
-  const spawn = spawnBehaviorOf(actor);
-  const entry = spawnConditionEntry(spawn);
-  if (!entry) return false;
-  const ai = readActorAi(actor);
-  if (!ai.spawnBehavior) return false;
-  const authored = sanitizeConditionEntry(entry);
-  const present = ai.conditions.some(item => sameConditionEntry(item, authored));
-  return writeActorAi(actor, { conditions: present ? undefined : [...ai.conditions, authored], spawnAdopted: spawn });
-}
-
-function sameConditionEntry(left, right) {
-  return Object.keys(right).every(key => left[key] === right[key]);
-}
-
-/** Write one or more AI fields on an Actor. Conditions are written as a whole list, never merged. */
-export async function writeActorAi(actor, { profile, priority, conditions, wasAggressed, spawnAdopted } = {}) {
+export async function writeActorAi(actor, {
+  profile, priority, conditions, wasAggressed, switchedProfile, markScene, spawnAdopted
+} = {}) {
   if (!actor) return false;
   const changes = {};
-  if (profile !== undefined && AI_PROFILE_VALUES.includes(profile)) changes[flagPath(ACTOR_FLAGS.PROFILE)] = profile;
+  const switchPath = flagPath(ACTOR_FLAGS.SWITCHED_PROFILE);
+  if (profile !== undefined && AI_PROFILE_VALUES.includes(profile)) {
+    changes[flagPath(ACTOR_FLAGS.PROFILE)] = profile;
+    if (actor.flags?.[MODULE_ID]?.[ACTOR_FLAGS.SWITCHED_PROFILE]) changes[switchPath] = '';
+  }
   if (priority !== undefined) {
     const value = Math.trunc(Number(priority));
     changes[flagPath(ACTOR_FLAGS.PRIORITY)] = Number.isFinite(value) ? value : AI_PRIORITY_DEFAULT;
@@ -125,6 +79,10 @@ export async function writeActorAi(actor, { profile, priority, conditions, wasAg
     changes[flagPath(ACTOR_FLAGS.CONDITIONS)] = conditions.map(normalizeStoredConditionEntry);
   }
   if (wasAggressed !== undefined) changes[flagPath(ACTOR_FLAGS.WAS_AGGRESSED)] = wasAggressed;
+  if (switchedProfile !== undefined) {
+    changes[switchPath] = AI_PROFILE_VALUES.includes(switchedProfile) ? switchedProfile : '';
+  }
+  if (markScene !== undefined) changes[flagPath(ACTOR_FLAGS.MARK_SCENE)] = String(markScene);
   if (spawnAdopted !== undefined) changes[flagPath(ACTOR_FLAGS.SPAWN_ADOPTED)] = spawnAdopted;
   if (!Object.keys(changes).length) return false;
   await actor.update(changes);
@@ -151,7 +109,7 @@ export function readItemAiData(source) {
   });
 }
 
-/** Write an Item's AI parameters. The AI Parameters dialog in `ui/item-parameters.mjs` saves through this. */
+/** Write an Item's AI parameters, as the AI Parameters dialog saves them. */
 export async function writeItemAiData(item, aiData) {
   if (!item) return false;
   await item.update({ [flagPath(ITEM_FLAGS.AI_DATA)]: { ...aiData } });
@@ -176,22 +134,20 @@ export async function writeCombatMode(combat, mode) {
 }
 
 /**
- * Whether an update sets or removes the module's mode flag. Removing the module's whole flag scope is only caught in
- * the older `-=` form.
+ * Whether an update sets or removes the module's mode flag, or removes the module's whole flag scope. Foundry v14 hands
+ * the update hook a removal as a `foundry.data.operators.ForcedDeletion` in place of the value, even when the caller
+ * asked for it with an older `-=` key.
  */
 export function changesCombatMode(changed) {
-  const flags = changed.flags;
-  const scope = flags?.[MODULE_ID];
-  if (scope?.[COMBAT_FLAGS.MODE] !== undefined) return true;
-  if (scope && Object.hasOwn(scope, `-=${COMBAT_FLAGS.MODE}`)) return true;
-  if (flags && Object.hasOwn(flags, `-=${MODULE_ID}`)) return true;
-  return false;
+  const scope = changed.flags?.[MODULE_ID];
+  if (scope instanceof foundry.data.operators.ForcedDeletion) return true;
+  return scope?.[COMBAT_FLAGS.MODE] !== undefined;
 }
 
 /* -------------------------------------------- */
 /*  Stop mark                                   */
 /* -------------------------------------------- */
-/** Where the Enemy AI stopped driving after an uncertain outcome, as recorded on the encounter, or null. */
+/** Where the Enemy AI gave up after an uncertain result, as recorded on the encounter, or null. */
 export function readStopMark(combat) {
   const raw = combat?.flags?.[MODULE_ID]?.[COMBAT_FLAGS.STOPPED_PHASE];
   if (!raw || typeof raw !== 'object') return null;

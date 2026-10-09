@@ -1,39 +1,40 @@
 /** @layer ui */
-import { AI_ITEM_ROLES, AI_PARAMETER_ITEM_TYPES, MODULE_ID } from '../constants.mjs';
+/*
+ * The AI Parameters button on the sheet of an item the AI can use, for the GM and Assistant GMs, and its dialog: the
+ * item's AI role, such as Heal, and that role's settings, saved as a flag on the item.
+ */
+import { AI_ITEM_ROLES, LOG, MODULE_ID } from '../constants.mjs';
 import { readItemAiData, writeItemAiData } from '../foundry/flags.mjs';
+import { systemItemType } from '../foundry/system-bridge.mjs';
+import { aiUsesItemKind } from '../planner/support.mjs';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Constants                                   */
 /* -------------------------------------------- */
 const TEMPLATE = `modules/${MODULE_ID}/templates/ai-parameters.hbs`;
 const FRAME_ACTION = 'enemyAiParameters';
 const FRAME_LABEL = 'AI Parameters';
-const CONSUMABLE_DOCUMENT = 'Consumable';
 
 /* -------------------------------------------- */
 /*  Applicability                               */
 /* -------------------------------------------- */
-/**
- * Whether an item's sheet gets AI parameters: Consumables and the subtypes in AI_PARAMETER_ITEM_TYPES, the only
- * items the AI can choose to use on its turn.
- */
-function supportsAiParameters(capabilities) {
-  if (!capabilities) return false;
-  if (String(capabilities.documentType ?? '') === CONSUMABLE_DOCUMENT) return true;
-  return AI_PARAMETER_ITEM_TYPES.has(String(capabilities.itemType ?? ''));
+/** Whether an item's sheet gets AI parameters: only the kinds of item the AI can choose to use on its turn. */
+function supportsAiParameters(item) {
+  if (item?.documentName !== 'Item') return false;
+  return aiUsesItemKind({ type: item.type, itemType: systemItemType(item) });
 }
 
 /* -------------------------------------------- */
 /*  Injection                                   */
 /* -------------------------------------------- */
 /**
- * Put the AI Parameters control in a rendered item sheet's header, for GMs only. The `renderItemSheet` hook in
- * `foundry/hooks.mjs` calls it on every render, and it removes its own earlier button first.
+ * Put the AI Parameters control in a rendered item sheet's header, for GMs only. It runs from the `renderItemSheetV2`
+ * hook on every render of any ItemSheetV2, and removes its own earlier button first.
  */
-export function injectItemParametersButton(app, element, context) {
+export function injectItemParametersButton(app, element) {
   const root = element ?? app?.element ?? null;
   if (!root?.querySelector || !game.user.isGM || app?.isEditable !== true) return;
-  if (!supportsAiParameters(app?.capabilities ?? context?.capabilities ?? null)) return;
+  if (!supportsAiParameters(app.document)) return;
   const header = root.querySelector('.window-header');
   const close = header?.querySelector('button[data-action="close"]');
   if (!close) return;
@@ -46,7 +47,8 @@ export function injectItemParametersButton(app, element, context) {
   button.setAttribute('data-tooltip', FRAME_LABEL);
   button.addEventListener('click', event => {
     event.preventDefault();
-    void openAiParametersDialog(app.document);
+    openAiParametersDialog(app.document)
+      .catch(error => console.error(`${LOG} could not open the AI Parameters dialog.`, error));
   });
   close.insertAdjacentElement('beforebegin', button);
 }

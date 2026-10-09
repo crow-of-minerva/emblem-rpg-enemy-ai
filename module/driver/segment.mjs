@@ -1,17 +1,24 @@
 /** @layer driver */
-import { EXECUTION_SEGMENT_LABEL, EXECUTION_TIMING, MODULE_ID } from '../constants.mjs';
+/*
+ * The execution segment runner. It holds the system's execution segment, the host client's sole right to run commands,
+ * for a whole enemy phase, and makes each gameplay call one checked action; the run stops at the first action whose
+ * result is unclear.
+ */
+import { LOG } from '../constants.mjs';
 import {
   SEGMENT_GAMEPLAY_METHODS,
-  hostRefusalCode,
-  isCommandHost,
   openExecutionSegment,
   pacingWait,
   segmentGameplay,
   systemResultCodes
 } from '../foundry/system-bridge.mjs';
+import { EXECUTION_TIMING } from './timing.mjs';
+
+/** The name the AI's run is opened under when it asks the system for exclusive use of its commands. */
+const EXECUTION_SEGMENT_LABEL = 'Enemy Phase';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Action outcomes, stop reasons and codes     */
 /* -------------------------------------------- */
 /** What one action's result lets the run do next. */
 const ACTION_VERDICTS = Object.freeze({
@@ -22,7 +29,7 @@ const ACTION_VERDICTS = Object.freeze({
   RELEASED: 'released'
 });
 
-/** Why a runner stopped driving. */
+/** Why the run stopped: a stop request, an unclear result, a lost host, or a segment released, closed or never open. */
 export const HALT_REASONS = Object.freeze({
   ABORT: 'abort',
   UNKNOWN: 'unknown',
@@ -45,17 +52,12 @@ const RUNNER_CODES = Object.freeze({
 const NO_EXECUTION_HALT = Object.freeze({ reason: HALT_REASONS.NO_EXECUTION, action: '', code: '', error: null });
 
 /* -------------------------------------------- */
-/*  Classification                              */
+/*  Reading an action's result                  */
 /* -------------------------------------------- */
 /**
- * What one action's result lets the run do next.
- *
- * Only a completed action, or one the system refused cleanly, lets the turn go on. A result that may hide saved
- * changes, including a refusal the system could not fully undo (`data.restored === false`), or one that says this
- * client is no longer the host, stops the run. The AI never retries an action whose outcome is unclear.
- *
- * The result codes are read on each call rather than at import, because the system may not have published its API
- * yet when this module loads.
+ * What one action's result lets the run do next: only a completed action, or a refusal the system fully undid, lets
+ * the turn go on, and anything else stops the run without a retry. The codes are read on each call, because the
+ * system may not have published its API yet when this module loads.
  * @param {*} result The system's `{ok, code, data}` result.
  * @returns {string} One of {@link ACTION_VERDICTS}.
  */
@@ -77,7 +79,7 @@ function classifyActionResult(result) {
 }
 
 /* -------------------------------------------- */
-/*  Halting                                     */
+/*  Stopping                                    */
 /* -------------------------------------------- */
 /** Thrown before or after an action once the run must stop. It unwinds the whole turn. */
 class DriveHalted extends Error {
@@ -98,15 +100,12 @@ export function isDriveHalted(error) {
 export const NO_EXECUTION = haltedActions(NO_EXECUTION_HALT);
 
 /* -------------------------------------------- */
-/*  Runner                                      */
+/*  The segment runner                          */
 /* -------------------------------------------- */
 /**
- * Holds the host client's sole right to run commands for one enemy phase, through one system execution segment.
- * `drivePhase` in `driver/phase.mjs` builds one per run, and the segment stays open across consecutive automatic units.
- *
- * Each gameplay call is one system action, checked and undoable on its own. The run stops at the first result whose
- * outcome is unclear, stops before the next action when asked, and never gives the segment up while one of its own
- * actions is still running. While other gameplay is running, opening is retried up to the limit in `EXECUTION_TIMING`.
+ * Holds the host client's sole right to run the system's commands for one enemy phase: one system execution segment,
+ * kept open from unit to unit. Each gameplay call is one checked action, and the run stops at the first unclear result
+ * or before the next action when asked, never giving the segment up while one of its actions is still running.
  */
 export class ExecutionSegmentRunner {
   #segment = null;
@@ -123,7 +122,7 @@ export class ExecutionSegmentRunner {
     return this.#segment?.held === true && this.#segment.closed !== true;
   }
 
-  /** Why the runner stopped driving, or null while it may still drive. */
+  /** Why the run stopped, or null while it may still act. */
   get halt() {
     return this.#halt;
   }
@@ -139,18 +138,17 @@ export class ExecutionSegmentRunner {
   }
 
   /* -------------------------------------------- */
-  /*  Ownership                                   */
+  /*  Opening, releasing and closing              */
   /* -------------------------------------------- */
   /**
-   * Open the execution segment for the run. Only a "busy" refusal is retried, within the time limit, and only while
-   * `revalidate` still says the run is wanted.
+   * Open the execution segment for the run, retrying a "busy" refusal within the time limit while `revalidate` says
+   * the run is still wanted. The system itself refuses a client that is not the host client.
    * @param {object} [options]
    * @param {Function} [options.revalidate] Whether the run is still wanted.
    * @returns {Promise<object>} The system's result, or the runner's own refusal.
    */
   async open({ revalidate = () => true } = {}) {
     if (this.#segment) return refusal(RUNNER_CODES.CLOSED);
-    if (!isCommandHost()) return refusal(hostRefusalCode());
     const result = await this.#acquire(() => openExecutionSegment(EXECUTION_SEGMENT_LABEL), revalidate);
     const segment = result?.ok === true ? result.data?.segment : null;
     if (!segment) return result?.ok === true ? refusal(RUNNER_CODES.NO_SEGMENT) : result;
@@ -197,8 +195,8 @@ export class ExecutionSegmentRunner {
   }
 
   /**
-   * Throws {@link DriveHalted} unless the run may still act on a held segment. Every action checks this first, and
-   * `driver/turn.mjs` also calls it before its own writes between actions.
+   * Throws {@link DriveHalted} unless the run may still act on a held segment. Every action checks this first, and the
+   * driver checks it before its own writes between actions.
    */
   checkpoint() {
     if (this.#halt) throw new DriveHalted(this.#halt);
@@ -249,7 +247,7 @@ export class ExecutionSegmentRunner {
 
   /**
    * Retry while the only refusal is "busy" and the run is still wanted. The limit is measured in elapsed time, so a
-   * page whose timers run slow still gives up on time.
+   * client whose timers run slow still gives up on time.
    */
   async #acquire(attempt, revalidate) {
     const { acquirePollMs, acquireTimeoutMs } = EXECUTION_TIMING;
@@ -261,7 +259,7 @@ export class ExecutionSegmentRunner {
       try {
         result = await attempt();
       } catch (error) {
-        console.error(`${MODULE_ID} | taking world execution failed.`, error);
+        console.error(`${LOG} could not take the Enemy AI execution segment.`, error);
         return refusal(systemResultCodes().COMMAND_FAILED);
       }
       if (result?.code !== systemResultCodes().COMMAND_EXECUTION_BUSY) return result;
@@ -298,7 +296,7 @@ function freezeHalt(reason, { action = '', code = '', error = null } = {}) {
   return Object.freeze({ reason, action, code, error });
 }
 
-/** Gameplay methods that all refuse with one halt, for a turn that has no execution to drive with. */
+/** Gameplay methods that all refuse with one halt, for a turn played outside any execution segment. */
 function haltedActions(halt) {
   const refuse = () => { throw new DriveHalted(halt); };
   const methods = SEGMENT_GAMEPLAY_METHODS.map(name => [name, async () => refuse()]);

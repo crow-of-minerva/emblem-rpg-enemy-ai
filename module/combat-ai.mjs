@@ -1,15 +1,16 @@
 /** @layer enemy-ai */
-import { ScenePlanner } from './planner/scene.mjs';
+/*
+ * The one set of Scene planners the whole module shares, so a Scene's battle memory is the same whichever part of the
+ * module asks for it.
+ */
+import { ScenePlanners } from './planner/scene.mjs';
 
 /* -------------------------------------------- */
-/*  The planner every caller starts from        */
+/*  Every Scene's planner                       */
 /* -------------------------------------------- */
 
 /**
- * The module's root planner: bound to no Scene, and the one every other planner comes from.
- *
- * `CombatAI.forScene(sceneUuid)` hands back the single planner for that Scene, and `runEnemyPhase` binds the root to
- * the encounter's Scene the same way. When an encounter ends, `foundry/hooks.mjs` calls `clearMemory(sceneUuid)` to
- * wipe that Scene's battle memory. A pause keeps it.
+ * The module's planners, one per Scene. `CombatAI.forScene(sceneUuid)` hands back that Scene's planner, whose battle
+ * memory is wiped when its encounter ends and kept through a pause.
  */
-export const CombatAI = new ScenePlanner('');
+export const CombatAI = new ScenePlanners();

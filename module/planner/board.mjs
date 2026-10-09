@@ -1,48 +1,55 @@
 /** @layer planner */
-import { actorOfToken, readActorAi, sceneUuidOfToken } from '../foundry/flags.mjs';
+/*
+ * The map as the planner reads it: each Scene's units and terrain as the system reports them, each unit joined to its
+ * Enemy AI flags, and the encounter's round. Reads are cached until the map changes and shared between callers, so
+ * never edit what they return.
+ */
+import { actorOfToken, sceneUuidOfToken } from '../foundry/documents.mjs';
+import { readActorAi } from '../foundry/flags.mjs';
 import { encounterState, terrainBoard, unitBoard } from '../foundry/system-bridge.mjs';
 import { boardMemo } from './memo.mjs';
 
 /* -------------------------------------------- */
-/*  Board view                                  */
+/*  The map as the planner reads it             */
 /* -------------------------------------------- */
 /** The terrain the planner assumes when its Scene has none. */
 const NO_TERRAIN = Object.freeze({ hasTerrain: false, defendPoints: [], travelBoundedByDistance: true });
 
 /**
- * The planner's view of its own Scene: the units and terrain the system reports there. Cached in the memo and shared
- * with every other caller.
+ * The planner's own Scene as it reads it: the units and terrain the system reports there, cached until the map changes
+ * and shared, so don't edit it.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @returns {import('./types.mjs').PlannerBoard}
  */
 export function board(planner) {
   return boardView(planner.sceneUuid);
 }
 
 /**
- * One Scene as the planner reads it: what the system reports for each placed unit, joined to the unit's AI flags.
- * Its unit and terrain reads both name that Scene, so it never describes whatever Scene the host client displays. An
- * unnamed Scene reads as empty.
+ * One Scene as the planner reads it, each placed unit joined to its AI flags. Both reads name that Scene, so it never
+ * describes whatever Scene the host client shows, and an unnamed Scene reads as empty.
  * @param {string} sceneUuid The Scene to read.
- * @returns {Readonly<object>}
+ * @returns {import('./types.mjs').PlannerBoard}
  */
 function boardView(sceneUuid) {
   const scene = String(sceneUuid ?? '');
   return boardMemo(`board|${scene}`, () => {
-    const facts = unitBoard(scene);
-    const units = (facts?.units ?? []).map(joinAiFacts);
+    const reported = unitBoard(scene);
+    const units = (reported?.units ?? []).map(withAiFlags);
     const byTokenUuid = new Map(units.map(unit => [unit.tokenUuid, unit]));
     const byTokenId = new Map(units.map(unit => [unit.tokenId, unit]));
     return Object.freeze({
-      sceneUuid: facts ? scene : '',
-      gridSize: facts?.gridSize ?? 100,
-      columns: facts?.columns ?? 0,
-      rows: facts?.rows ?? 0,
-      phase: facts?.phase ?? '',
-      round: facts?.round ?? null,
-      encounterActive: facts?.encounterActive === true,
-      exploration: facts?.exploration === true,
-      classicFlyers: facts?.classicFlyers === true,
-      flightForbidden: facts?.flightForbidden === true,
-      terrain: (facts ? terrainBoard(scene) : null) ?? NO_TERRAIN,
+      sceneUuid: reported ? scene : '',
+      gridSize: reported?.gridSize ?? 100,
+      columns: reported?.columns ?? 0,
+      rows: reported?.rows ?? 0,
+      phase: reported?.phase ?? '',
+      round: reported?.round ?? null,
+      encounterActive: reported?.encounterActive === true,
+      exploration: reported?.exploration === true,
+      classicFlyers: reported?.classicFlyers === true,
+      flightForbidden: reported?.flightForbidden === true,
+      terrain: (reported ? terrainBoard(scene) : null) ?? NO_TERRAIN,
       units: Object.freeze(units),
       byTokenUuid,
       byTokenId
@@ -50,17 +57,31 @@ function boardView(sceneUuid) {
   });
 }
 
-function joinAiFacts(facts) {
-  const actor = actorOfToken(facts.tokenUuid);
-  return Object.freeze({ ...facts, ai: readActorAi(actor) });
+/**
+ * One unit's record from the system, with its actor's Enemy AI flags added as `ai`.
+ * @param {import('../foundry/system-bridge.mjs').MeasuredUnit} record The system's record for one token.
+ * @returns {import('./types.mjs').PlannerUnit}
+ */
+function withAiFlags(record) {
+  const actor = actorOfToken(record.tokenUuid);
+  return Object.freeze({ ...record, ai: readActorAi(actor) });
 }
 
-/** The unit behind a token uuid, read from the Scene that Token belongs to, or null. */
+/**
+ * The unit behind a token uuid, read from the Scene that Token belongs to, or null.
+ * @param {string} tokenUuid The unit's token.
+ * @returns {import('./types.mjs').PlannerUnit|null}
+ */
 export function unitByTokenUuid(tokenUuid) {
   return boardView(sceneUuidOfToken(tokenUuid)).byTokenUuid.get(tokenUuid) ?? null;
 }
 
-/** The unit standing behind a token id on a named Scene, or null. */
+/**
+ * The unit standing behind a token id on a named Scene, or null.
+ * @param {string} tokenId The unit's token id.
+ * @param {string} sceneUuid The Scene the token is on.
+ * @returns {import('./types.mjs').PlannerUnit|null}
+ */
 export function unitByTokenId(tokenId, sceneUuid) {
   return boardView(sceneUuid).byTokenId.get(tokenId) ?? null;
 }
@@ -68,7 +89,7 @@ export function unitByTokenId(tokenId, sceneUuid) {
 /* -------------------------------------------- */
 /*  The encounter's round                       */
 /* -------------------------------------------- */
-/** The round a named Scene's authored conditions are checked against, or null outside a started encounter there. */
+/** The round the GM's conditions on a named Scene are checked against, or null outside a started encounter there. */
 export function aiConditionContext(sceneUuid) {
   const state = encounterState(sceneUuid);
   const round = Number(state?.round);

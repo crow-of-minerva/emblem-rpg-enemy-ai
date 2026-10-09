@@ -1,7 +1,14 @@
 /** @layer planner */
+/*
+ * Scoring an attack: the matchup the system measures for it from a given square, as the exchange would resolve it,
+ * weighed by the unit's profile for damage, risk and position.
+ */
+import { AI_LESSER_TARGET_FACTIONS } from '../constants.mjs';
+import { measure as measureMatchup } from '../foundry/system-bridge.mjs';
+import { groundSignature } from './squares.mjs';
+import { tauntorOf } from './targeting.mjs';
 import {
   AI_LESSER_TARGET_APPEAL,
-  AI_LESSER_TARGET_FACTIONS,
   BREAK_BONUS,
   BREAK_PROGRESS_WEIGHT,
   LETHAL_BONUS,
@@ -15,19 +22,27 @@ import {
   SEIZE_BLOCKER_BONUS,
   SUICIDE_PENALTY,
   UNANSWERED_FACTOR
-} from '../constants.mjs';
-import { measure as measureMatchup } from '../foundry/system-bridge.mjs';
-import { groundSignature } from './geometry.mjs';
-import { tauntorOf } from './roster.mjs';
-import { averageDamage } from './vocabulary.mjs';
+} from './tuning.mjs';
 
 /* -------------------------------------------- */
 /*  Measurement                                 */
 /* -------------------------------------------- */
 /**
- * One matchup as the exchange would resolve it, measured from a hypothetical square. `ground` passes the square's
- * terrain and aura values, which anchorPropertiesSteps in `planning.mjs` has already read; the system reads any part
- * left out itself, which is slow for auras.
+ * One matchup as the exchange would resolve it, measured from a hypothetical square. `ground` passes the terrain and
+ * aura values the planner has already read for the square; the system reads any part left out, which is slow for auras.
+ * @param {import('./types.mjs').PlannerUnit} attacker The unit attacking.
+ * @param {import('./types.mjs').PlannerUnit} defender The unit attacked.
+ * @param {import('./types.mjs').LoadoutWeapon|null} weapon The attacker's weapon.
+ * @param {number} distance The distance it attacks from, in squares.
+ * @param {string|null} [dmgType] The damage type to deal; the system picks when null.
+ * @param {object} [options]
+ * @param {boolean} [options.targetFlanked] Whether the attack flanks the defender.
+ * @param {boolean} [options.attackerFlanked] Whether the attacker is flanked on that square.
+ * @param {{x: number, y: number}|null} [options.standing] The square it attacks from; where it stands when null.
+ * @param {string} [options.defenderWeaponId] The weapon the defender counters with, instead of its equipped one.
+ * @param {{terrain?: object|null, aura?: object|null}|null} [options.ground] The square's terrain bonus and aura
+ *   fields, already read.
+ * @returns {import('./types.mjs').Matchup|null} Null when the system can't measure the matchup.
  */
 export function measure(attacker, defender, weapon, distance, dmgType = null,
   { targetFlanked = false, attackerFlanked = false, standing = null, defenderWeaponId, ground = null } = {}) {
@@ -57,34 +72,44 @@ function suppliedGround(ground) {
 }
 
 /**
- * Score every candidate square for one weapon, measuring each distinct matchup once, and return the best so far.
- * `planning.mjs` groups the candidates by weapon and calls this once per group. It yields after every matchup the
- * system really measured, the one expensive call in a plan, and never after a remembered one, so
- * `ui/idle-steps.mjs` can spread a plan across frames.
+ * Score every candidate square for one weapon, measuring each distinct matchup once, and return the best so far. It
+ * yields after every matchup the system really measured, the one expensive call in a plan, and never after one it
+ * remembered.
+ * @param {import('./types.mjs').ActionSearch} search The unit attacking and the weights it plans with.
+ * @param {object[]} group The candidates that share one weapon: each a square, a target and the distance, with the
+ *   square's ground and position.
+ * @param {object|null} best The best candidate from earlier groups, or null.
+ * @param {object} [seize]
+ * @param {import('./types.mjs').PlannerUnit|null} [seize.blocker] A unit in a Seize unit's way, whose attack earns
+ *   the Seize bonus.
+ * @param {number} [seize.unlock] How much clearing that blocker shortens the Seize route, from 0 to 1.
+ * @returns {Generator<void, object|null>} The best candidate so far, with its `score` and `matchup` added.
  */
-export function* measureGroupSteps(group, unit, weapon, riskProfile, best, blocker = null, unlock = 0) {
+export function* measureGroupSteps(search, group, best, { blocker = null, unlock = 0 } = {}) {
+  const { unit, risk: riskProfile } = search;
+  const weapon = group[0].weapon;
   const measured = new Map();
   let winner = best;
   for (const candidate of group) {
-    const defender = candidate.targetToken;
+    const defender = candidate.target;
     const flank = { targetFlanked: candidate.flank, attackerFlanked: candidate.flanked };
     const bits = `${flank.targetFlanked ? 1 : 0}${flank.attackerFlanked ? 1 : 0}`;
     const key = `${defender.tokenUuid}|${candidate.distance}|${groundSignature(candidate)}|${bits}`;
-    let cData = measured.get(key);
-    if (cData === undefined) {
-      cData = measure(unit, defender, weapon, candidate.distance, null, {
+    let matchup = measured.get(key);
+    if (matchup === undefined) {
+      matchup = measure(unit, defender, weapon, candidate.distance, null, {
         ...flank, standing: { x: candidate.anchorX, y: candidate.anchorY },
         ground: { terrain: candidate.terrain, aura: candidate.aura }
       });
-      measured.set(key, cData);
+      measured.set(key, matchup);
       yield;
     }
-    if (!cData) continue;
-    if (cData.attackCount < 1) continue;
+    if (!matchup) continue;
+    if (matchup.attackCount < 1) continue;
     const blocking = (blocker && defender.tokenUuid === blocker.tokenUuid) ? unlock : 0;
-    const scored = score(cData, unit, defender, riskProfile, candidate, blocking);
+    const scored = score(matchup, unit, defender, riskProfile, candidate, blocking);
     if (!scored.productive) continue;
-    if (isBetter(scored, candidate, winner)) winner = { ...candidate, score: scored, cData };
+    if (isBetter(scored, candidate, winner)) winner = { ...candidate, score: scored, matchup };
   }
   return winner;
 }
@@ -92,7 +117,13 @@ export function* measureGroupSteps(group, unit, weapon, riskProfile, best, block
 /* -------------------------------------------- */
 /*  Scoring                                     */
 /* -------------------------------------------- */
-/** What a square is worth beyond what can be hit from it: exposure, cover, the flank, the hazard and the walk. */
+/**
+ * What a square is worth beyond what can be hit from it: exposure, cover, the flank, the hazard and the walk.
+ * @param {import('./types.mjs').StandingSquare|null} position The square as the planner read it.
+ * @param {import('./types.mjs').RiskProfile} profile The weights the unit plans with.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit standing there.
+ * @returns {number} Points added to a plan's total, negative for a bad square.
+ */
 export function positionalValue(position, profile, unit) {
   if (!position) return 0;
   const maxHp = unit.hpMax || 1;
@@ -110,98 +141,126 @@ function targetAppeal(defender) {
   return AI_LESSER_TARGET_FACTIONS.includes(defender?.factionRole) ? AI_LESSER_TARGET_APPEAL : 1;
 }
 
+/** The midpoint of a damage figure, which may be a single number or a range such as "4-8". */
+function averageDamage(damageValue) {
+  const text = String(damageValue ?? '0').trim();
+  const spread = text.match(/^(\d+)-(\d+)$/);
+  if (spread) return (parseInt(spread[1], 10) + parseInt(spread[2], 10)) / 2;
+  const flat = parseInt(text, 10);
+  return Number.isNaN(flat) ? 0 : flat;
+}
+
 /**
- * Score one attack: what it deals, what it invites, what it opens, and where it leaves the unit. The profile also
- * weighs damage types against the raw numbers: `dealtTypeWeight` scales the blow's worth and `takenTypeWeight` the
- * counter's cost by how each one's type lands, as typeAffinity below reads it. Only `total` carries that weighing.
- * Every other field stays as measured.
+ * Score one attack: what it deals, what it invites, what it opens, and where it leaves the unit. Only `total` weighs
+ * damage types, through the profile's `dealtTypeWeight` and `takenTypeWeight`; every other field stays as measured.
+ * @param {import('./types.mjs').Matchup} matchup The system's forecast of the exchange.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit attacking.
+ * @param {import('./types.mjs').PlannerUnit} defender The unit attacked.
+ * @param {import('./types.mjs').RiskProfile} risk The weights it plans with.
+ * @param {import('./types.mjs').StandingSquare|null} [position] The square it attacks from, or null to leave the
+ *   square out.
+ * @param {number} [blockerUnlock] How much clearing this defender shortens a Seize route, from 0 to 1; 0 when it
+ *   isn't in the way.
+ * @returns {import('./types.mjs').AttackScore}
  */
-export function score(cData, unit, defender, risk, position = null, blockerUnlock = 0) {
+export function score(matchup, unit, defender, risk, position = null, blockerUnlock = 0) {
   if (!risk) throw new TypeError('score: a risk profile is required.');
-  const profile = risk;
   const blocking = blockerUnlock > 0;
   const compelled = !!tauntorOf(unit);
   const appeal = (compelled || blocking) ? 1 : targetAppeal(defender);
-  const counterWeight = profile.counterWeight;
-  const lethalWeight = profile.lethalWeight;
-  const hitChance = Math.max(0, Math.min(100, cData.hitChance)) / 100;
-  const critChance = Math.max(0, Math.min(100, cData.critChance)) / 100;
-  const critMult = Number(cData.critMultiplier) || Number(unit.critMultiplier) || 2;
-  const baseHit = averageDamage(cData.damage);
-  const perHit = baseHit * (1 + (critChance * (critMult - 1)));
-  const attacks = Math.max(1, cData.attackCount || 1);
-  const expected = hitChance * perHit * attacks;
+  const { hitChance, attacks, expected, targetHp, killChance, counterChance, expectedTaken } =
+    exchangeOdds(matchup, defender);
 
-  const targetHp = Math.max(1, (defender.hp ?? 0) - (defender.pendingPhaseDamage ?? 0));
-  let counterPerHit = 0;
-  if (cData.defenderCanRespond) {
-    const counterHit = Math.max(0, Math.min(100, cData.defender?.hitChance ?? 0)) / 100;
-    const counterCrit = Math.max(0, Math.min(100, cData.defender?.critChance ?? 0)) / 100;
-    const counterMult = Number(cData.defender?.critMultiplier) || Number(defender.critMultiplier) || 2;
-    counterPerHit = counterHit * averageDamage(cData.defender?.damage) * (1 + (counterCrit * (counterMult - 1)));
-  }
-  const { killChance, counterChance, expectedTaken } = walkExchange(cData, {
-    hitChance, critChance, normalDamage: baseHit, critDamage: baseHit * critMult, targetHp, attacks,
-    counters: cData.defenderCanRespond ? Math.max(0, cData.defender?.attackCount || 0) : 0, counterPerHit
-  });
-
-  const selfHpNow = unit.hp ?? 0;
-  const selfHp = Math.max(1, selfHpNow - (unit.pendingPhaseDamage ?? 0));
+  const selfHpNow = unit.hp;
+  const selfHp = Math.max(1, selfHpNow - unit.pendingPhaseDamage);
   const selfMaxHp = unit.hpMax || selfHp || 1;
   const targetMaxHp = defender.hpMax || targetHp || 1;
   const suicidal = selfHpNow > 0 && expectedTaken >= selfHp;
-  const unanswered = counterChance === 0;
-
   const dealtFraction = expected / targetMaxHp;
   const takenFraction = expectedTaken / selfMaxHp;
-  const dealtWorth = dealtFraction * (1 + (profile.dealtTypeWeight * typeAffinity(cData)));
-  const takenCost = takenFraction * (1 + (profile.takenTypeWeight * typeAffinity(cData.defender)));
-  const positional = positionalValue(position, profile, unit);
-  const caution = blocking ? Math.min(1, Math.max(0, blockerUnlock)) : 0;
+  const positional = positionalValue(position, risk, unit);
+  const riskDiscount = blocking ? Math.min(1, Math.max(0, blockerUnlock)) : 0;
+  const breaksTarget = matchup.willBreak === true;
+  const breakProgress = breakProgressOf(matchup, breaksTarget, hitChance, attacks);
 
-  const breaksTarget = cData.willBreak === true;
-  const targetStance = Math.max(0, cData.defender?.stance ?? 0);
-  const breakProgress = (!breaksTarget && targetStance > 0)
-    ? Math.min(1, (hitChance * Math.max(0, cData.breakDamage ?? 0) * attacks) / targetStance)
-    : 0;
+  // What the blow gains, in shares of the target's max HP, scaled by what the target is worth to its faction.
+  const dealtWorth = dealtFraction * (1 + (risk.dealtTypeWeight * typeAffinity(matchup)));
+  const lethalBonus = LETHAL_BONUS * risk.lethalWeight * killChance;
+  const unansweredBonus = (1 - counterChance) * dealtWorth * UNANSWERED_FACTOR;
+  const breakBonus = breaksTarget ? BREAK_BONUS : 0;
+  const progressBonus = BREAK_PROGRESS_WEIGHT * breakProgress;
+  const gain = appeal * (dealtWorth + lethalBonus + unansweredBonus + breakBonus + progressBonus);
+  // What it risks, in shares of the unit's max HP. The more clearing a blocker opens a Seize route, the less the
+  // counter counts, and the same goes for the square below.
+  const takenCost = takenFraction * (1 + (risk.takenTypeWeight * typeAffinity(matchup.defender)));
+  const counterCost = risk.counterWeight * takenCost * (1 - riskDiscount);
+  const suicideCost = (suicidal && !blocking) ? (risk.suicideWeight ?? 1) * SUICIDE_PENALTY : 0;
+  // The square and the Seize blocker bonus are already in score points.
+  const squareValue = positional * (1 - riskDiscount);
+  const blockerBonus = blocking ? SEIZE_BLOCKER_BONUS * blockerUnlock : 0;
 
   return {
     expectedDamage: expected,
     expectedTaken,
     dealtFraction,
     takenFraction,
-    hitChance: cData.hitChance,
+    hitChance: matchup.hitChance,
     killChance,
     counterChance,
-    unanswered,
+    unanswered: counterChance === 0,
     suicidal,
     positional,
     breaksTarget,
     breakProgress,
     blocking,
     compelled,
-    productive: profile.ignoresProductivity === true || blocking || compelled
-      || expected >= MIN_MEANINGFUL_DAMAGE,
+    productive: risk.ignoresProductivity === true || blocking || compelled || expected >= MIN_MEANINGFUL_DAMAGE,
     appeal,
-    total: SCORE_SCALE * (
-      appeal * (
-        dealtWorth
-        + (LETHAL_BONUS * lethalWeight * killChance)
-        + ((1 - counterChance) * dealtWorth * UNANSWERED_FACTOR)
-        + (breaksTarget ? BREAK_BONUS : 0)
-        + (BREAK_PROGRESS_WEIGHT * breakProgress)
-      )
-      - (counterWeight * takenCost * (1 - caution))
-      - ((suicidal && !blocking) ? (profile.suicideWeight ?? 1) * SUICIDE_PENALTY : 0)
-    ) + (positional * (1 - caution)) + (blocking ? SEIZE_BLOCKER_BONUS * blockerUnlock : 0)
+    total: (SCORE_SCALE * (gain - counterCost - suicideCost)) + squareValue + blockerBonus
   };
 }
 
 /**
- * How one side of a matchup lands its damage type on the other: 1 on a vulnerability, -1 on a protection, 0
- * otherwise. score reads this unit's blow off the matchup and the counter off its `defender`. A side that rolls its
- * type per blow counts as 0, since the matchup names only the first type it could roll. Immunity needs no sign,
- * because the measured damage is already nothing.
+ * The exchange's odds: the attacker's hit chance and blows, the damage it is expected to deal, the target's HP once
+ * its pending phase damage lands, and the kill and counter figures `walkExchange` works out.
+ */
+function exchangeOdds(matchup, defender) {
+  const hitChance = Math.max(0, Math.min(100, matchup.hitChance)) / 100;
+  const critChance = Math.max(0, Math.min(100, matchup.critChance)) / 100;
+  const critMult = matchup.critMultiplier;
+  const baseHit = averageDamage(matchup.damage);
+  const perHit = baseHit * (1 + (critChance * (critMult - 1)));
+  const attacks = Math.max(1, matchup.attackCount || 1);
+  const expected = hitChance * perHit * attacks;
+  const targetHp = Math.max(1, defender.hp - defender.pendingPhaseDamage);
+  const walked = walkExchange(matchup, {
+    hitChance, critChance, normalDamage: baseHit, critDamage: baseHit * critMult, targetHp, attacks,
+    counters: matchup.defenderCanRespond ? Math.max(0, matchup.defender?.attackCount || 0) : 0,
+    counterPerHit: counterPerHitOf(matchup)
+  });
+  return { hitChance, attacks, expected, targetHp, ...walked };
+}
+
+/** The damage each blow of the defender's counter is expected to deal, crits included, or 0 when it can't counter. */
+function counterPerHitOf(matchup) {
+  if (!matchup.defenderCanRespond) return 0;
+  const counterHit = Math.max(0, Math.min(100, matchup.defender?.hitChance ?? 0)) / 100;
+  const counterCrit = Math.max(0, Math.min(100, matchup.defender?.critChance ?? 0)) / 100;
+  const counterMult = matchup.defender.critMultiplier;
+  return counterHit * averageDamage(matchup.defender?.damage) * (1 + (counterCrit * (counterMult - 1)));
+}
+
+/** How far, from 0 to 1, the expected hits wear down the target's stance, or 0 when they break it outright. */
+function breakProgressOf(matchup, breaksTarget, hitChance, attacks) {
+  const targetStance = Math.max(0, matchup.defender?.stance ?? 0);
+  return (!breaksTarget && targetStance > 0)
+    ? Math.min(1, (hitChance * Math.max(0, matchup.breakDamage ?? 0) * attacks) / targetStance)
+    : 0;
+}
+
+/**
+ * How one side of a matchup lands its damage type on the other: 1 on a vulnerability, -1 on a protection, and 0
+ * otherwise or for a side that rolls its type per blow. Immunity needs no sign, since its measured damage is already 0.
  */
 function typeAffinity(side) {
   if (!side || side.randomizeDamageType === true) return 0;
@@ -210,10 +269,10 @@ function typeAffinity(side) {
 }
 
 /** Walk an exchange blow by blow, in the order the sequence says, for the kill and the counter it really invites. */
-function walkExchange(cData, {
+function walkExchange(matchup, {
   hitChance, critChance, normalDamage, critDamage, targetHp, attacks, counters, counterPerHit
 }) {
-  let strikes = (String(cData.attackSequence ?? '').match(/[AD]\d+/g) ?? []).map(entry => entry[0]);
+  let strikes = (String(matchup.attackSequence ?? '').match(/[AD]\d+/g) ?? []).map(entry => entry[0]);
   if (!strikes.includes('A')) strikes = [...Array(attacks).fill('A'), ...Array(counters).fill('D')];
   if (counters <= 0) strikes = strikes.filter(entry => entry === 'A');
 

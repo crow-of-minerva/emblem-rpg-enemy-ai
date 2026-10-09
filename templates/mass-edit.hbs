@@ -1,0 +1,60 @@
+{{!-- The body of the Set Combat AI on Selected window, its body part; its data comes from _prepareContext in
+module/ui/mass-edit.mjs. The window draws it again after an entry is added or removed, or an Overwrite box or the
+profile changes. --}}
+<div class="emblem-aiset ed-container">
+  {{#if skippedNote}}
+    <p class="acp-cond-note"><i class="fas fa-triangle-exclamation"></i> {{skippedNote}}</p>
+  {{/if}}
+  <label class="ed-label aiset-scope">
+    <input type="checkbox" class="ed-checkbox" name="writeProfile" {{#if writeProfile}}checked{{/if}} />
+    Overwrite AI Profile
+  </label>
+  <div class="aiset-block{{#unless writeProfile}} is-off{{/unless}}">
+    <div class="acp-row acp-row-split">
+      <div class="acp-field">
+        <label class="ed-label">Combat AI Profile</label>
+        <select class="ed-select" name="profile">
+          {{#each profiles}}
+            <option value="{{value}}" {{#if selected}}selected{{/if}}>{{label}}</option>
+          {{/each}}
+        </select>
+      </div>
+      <div class="acp-field acp-ai-priority">
+        <label class="ed-label">
+          Priority
+          <span class="acp-help-dot" data-tooltip="Enemy-phase order (higher acts first)"
+            data-tooltip-direction="LEFT">?</span>
+        </label>
+        <input type="number" class="ed-input" name="priority" value="{{priority}}" step="1" />
+      </div>
+    </div>
+  </div>
+  <hr class="aiset-rule" />
+  <label class="ed-label aiset-scope">
+    <input type="checkbox" class="ed-checkbox" name="writeConditions" {{#if writeConditions}}checked{{/if}} />
+    Overwrite Conditions
+  </label>
+  <p class="acp-cond-note" {{#unless settingManual}}hidden{{/unless}}>
+    <i class="fas fa-circle-info"></i>
+    The AI never plays a Manual unit, so units set to Manual keep the conditions they have.
+  </p>
+  <div class="aiset-block acp-ai-conditions{{#if conditionsOff}} is-off{{/if}}">
+    <div class="acp-section-head">
+      <label class="ed-label">Conditions</label>
+      {{!-- The id lets the button keep the focus when the window draws its body again. --}}
+      <button type="button" id="{{partId}}-add-entry" class="acp-btn acp-btn-mini" data-action="addCondition">
+        <i class="fas fa-plus"></i> Add Entry
+      </button>
+    </div>
+    <div class="acp-cond-list">
+      {{#each rows}}
+        {{> enemy-ai-condition-row actionAttribute="data-action"}}
+      {{else}}
+        <p class="acp-cond-note">
+          <i class="fas fa-triangle-exclamation"></i>
+          No conditions, so applying clears every entry these units already have.
+        </p>
+      {{/each}}
+    </div>
+  </div>
+</div>

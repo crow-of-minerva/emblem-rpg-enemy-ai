@@ -1,4 +1,8 @@
 /** @layer ui */
+/*
+ * Running the planner's stepped work in the browser's idle time, so a long plan never holds up a canvas frame or an
+ * input event.
+ */
 
 /* -------------------------------------------- */
 /*  Idle work                                   */
@@ -6,7 +10,7 @@
 /** What `runWhenIdle` resolves with when the work was abandoned rather than finished. */
 export const ABANDONED = Symbol('abandoned');
 
-/** How long a page that never goes idle may starve the work before it is given one step anyway. */
+/** How long a browser that never goes idle may starve the work before it is given one step anyway. */
 const IDLE_TIMEOUT_MS = 60;
 /** The slice a browser without `requestIdleCallback` gets per timer turn. */
 const FALLBACK_SLICE_MS = 6;
@@ -14,8 +18,8 @@ const FALLBACK_SLICE_MS = 6;
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
 /**
- * Wait for the page's next idle period and report how much of it is left. The browser knows when the canvas frame
- * is done and how long until the next one. A browser without `requestIdleCallback` gets a timer turn and a fixed slice.
+ * Wait for the browser's next idle period, which comes once the canvas frame is done, and report how much of it is
+ * left. A browser without `requestIdleCallback` gets a timer turn and a fixed slice.
  * @returns {Promise<function(): number>} Milliseconds of idle time remaining, asked as often as the caller likes.
  */
 function nextIdlePeriod() {
@@ -32,9 +36,8 @@ function nextIdlePeriod() {
 }
 
 /**
- * Run stepped planner work in the page's idle time, so a long plan never holds a frame or an input event.
- * `ui/threat-intent.mjs` plans the selected enemy's turn through here. Nothing runs in the caller's own turn. Each
- * idle period takes at least one step and then as many as still fit, and a period that timed out takes exactly one.
+ * Run stepped planner work in the browser's idle time, so a long plan never holds a frame or an input event. Each idle
+ * period takes at least one step and then as many as still fit; nothing runs in the caller's own turn.
  * @param {Generator} steps Stepped work from `planner/`, one yield between expensive calls.
  * @param {object} [options]
  * @param {function(): boolean} [options.abandoned] Asked before every step. True closes the work unfinished.

@@ -1,42 +1,45 @@
 /** @layer planner */
-import { FLEEING_STATUSES, INCAPACITATING_STATUSES } from '../constants.mjs';
+/*
+ * Whether a unit can act, read straight off the system's record for it. That record's numbers are never missing and
+ * its status keys are already lowercase, so nothing here converts them.
+ */
+import { FLEEING_STATUSES } from '../constants.mjs';
+import { systemIncapacitatingStatuses } from '../foundry/system-bridge.mjs';
 
 /* -------------------------------------------- */
 /*  Readiness                                   */
 /* -------------------------------------------- */
 /** Whether a unit is still standing. */
 export function isAlive(unit) {
-  return (Number(unit?.hp) || 0) > 0;
+  return unit.hp > 0;
 }
 
 /** Whether a unit's stance is exhausted. */
 export function isStanceBroken(unit) {
-  return (Number(unit?.stance) || 0) <= 0;
-}
-
-/** Whether a status has taken this unit's action away, so it attacks nobody. A feared unit counts as held. */
-export function isHeldByStatus(unit) {
-  return statusKeysOf(unit).some(status => INCAPACITATING_STATUSES.includes(status));
+  return unit.stance <= 0;
 }
 
 /**
- * Whether a status forces this unit to spend its own turn fleeing: it is feared, and no other status holds it in place
- * outright. Such a unit still gets its turn and spends it retreating; everywhere else it counts as held through
- * {@link isHeldByStatus}.
+ * Whether a status has taken this unit's action away, so it attacks nobody: one of the system's incapacitating
+ * statuses. A feared unit counts as held.
+ */
+export function isHeldByStatus(unit) {
+  const incapacitating = systemIncapacitatingStatuses();
+  return unit.statuses.some(status => incapacitating.includes(status));
+}
+
+/**
+ * Whether a status forces this unit to spend its own turn fleeing: it is feared, and no other status holds it in place.
+ * Everywhere but its own turn, a feared unit counts as held through {@link isHeldByStatus}.
  */
 export function fleesByStatus(unit) {
-  const statuses = statusKeysOf(unit);
-  if (!statuses.some(status => FLEEING_STATUSES.includes(status))) return false;
-  return !statuses.some(status => INCAPACITATING_STATUSES.includes(status) && !FLEEING_STATUSES.includes(status));
+  if (!unit.statuses.some(status => FLEEING_STATUSES.includes(status))) return false;
+  const incapacitating = systemIncapacitatingStatuses();
+  return !unit.statuses.some(status => incapacitating.includes(status) && !FLEEING_STATUSES.includes(status));
 }
 
 /** Whether this unit can't act at all when its turn comes: its stance is broken, or a status holds it. */
 export function isIncapacitated(unit) {
   if (!unit) return false;
   return isStanceBroken(unit) || isHeldByStatus(unit);
-}
-
-/** A unit's status keys, lower-cased so a status is matched without regard to case. */
-function statusKeysOf(unit) {
-  return Array.from(unit?.statuses ?? [], status => String(status).toLowerCase());
 }

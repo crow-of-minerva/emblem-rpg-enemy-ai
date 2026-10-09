@@ -1,18 +1,21 @@
 /** @layer driver */
+/*
+ * Carrying out a planned move, attack, take-off or support action through the system's commands. Each one checks the
+ * plan again against the map as it stands now, since the map may have changed while the unit walked.
+ */
 import { LOG } from '../constants.mjs';
 import { faceTargets, playSound } from '../foundry/system-bridge.mjs';
 import { unitByTokenUuid } from '../planner/board.mjs';
-import { occupiedCells } from '../planner/geometry.mjs';
-import { invalidateBoardMemo } from '../planner/memo.mjs';
-import { canActivate, canTarget, loadout } from '../planner/roster.mjs';
-import { bonusSelfHealItemsOf, healThresholdOf, itemHasUses } from '../planner/support.mjs';
-import { footprintOccupiedIn, unitDistance } from '../planner/vocabulary.mjs';
+import { footprintOccupiedIn, unitDistance } from '../planner/grid.mjs';
+import { canActivate, canTarget } from '../planner/loadout.mjs';
+import { occupiedCells } from '../planner/squares.mjs';
+import { bonusSelfHealDue, itemHasUses } from '../planner/support.mjs';
 import { awaitSettled } from './pacing.mjs';
 import { routeFrom, segmentRoute } from './routes.mjs';
 import { NO_EXECUTION } from './segment.mjs';
 
 /* -------------------------------------------- */
-/*  Vocabulary                                  */
+/*  Constants                                   */
 /* -------------------------------------------- */
 /** What the driver answers when an exchange or an activation offers it a choice. */
 const END_TURN_DECISION = 'end-turn';
@@ -28,8 +31,8 @@ function hasArrived(unit, destination) {
 }
 
 /**
- * Walk a unit to a destination, teleporting where the route uses paired pads, and leave its movement plan the way the
- * caller asked. Each walked stretch goes to the system's own drive command, which checks the route again itself.
+ * Walk a unit to a destination, teleporting where the route uses paired pads, and leave its movement plan as `then`
+ * asks. Each walked stretch goes to the system's own drive command, which checks the route again itself.
  * @param {object} planner The Scene's planner, which owns the teleport pads a route may use.
  * @param {object} unit The unit as last read from the map.
  * @param {object} destination The square the plan wants.
@@ -71,7 +74,6 @@ async function openPlan(unit, actions = NO_EXECUTION) {
 async function driveCells(unit, steps, then, actions = NO_EXECUTION) {
   const path = steps.map(([x, y]) => ({ x, y }));
   const result = await actions.drive({ tokenUuid: unit.tokenUuid, path, then });
-  invalidateBoardMemo();
   if (result?.ok !== true) console.warn(`${LOG} ${unit.name} could not walk its route.`, result?.code ?? '');
   return result?.ok === true;
 }
@@ -79,7 +81,6 @@ async function driveCells(unit, steps, then, actions = NO_EXECUTION) {
 /** Teleport from the pad the unit stands on, using the plan the walk before it left open or `moveTo` opened. */
 async function hop(unit, segment, actions = NO_EXECUTION) {
   const result = await actions.teleport(unit.tokenUuid);
-  invalidateBoardMemo();
   if (result?.ok !== true) {
     console.warn(`${LOG} ${unit.name}'s teleport ${segment.letter} was refused.`, result?.code ?? '');
     return false;
@@ -95,7 +96,6 @@ async function hop(unit, segment, actions = NO_EXECUTION) {
 export async function takeOff(unit, actions = NO_EXECUTION) {
   if (!await openPlan(unit, actions)) return false;
   const result = await actions.toggleFlight(unit.tokenUuid);
-  invalidateBoardMemo();
   if (result?.ok !== true) console.warn(`${LOG} ${unit.name} could not take off.`, result?.code ?? '');
   return result?.ok === true;
 }
@@ -103,11 +103,10 @@ export async function takeOff(unit, actions = NO_EXECUTION) {
 /* -------------------------------------------- */
 /*  Performing                                  */
 /* -------------------------------------------- */
-/** Wield the weapon a unit is about to swing, unless it already is. */
+/** Wield the weapon a unit is about to swing, unless it already is. False when the system refused the wield. */
 async function equip(unit, weapon, actions = NO_EXECUTION) {
   if (!weapon || weapon.wielded === true) return true;
   const result = await actions.wieldWeapon(unit.actorUuid, weapon.id);
-  invalidateBoardMemo();
   return result?.ok !== false;
 }
 
@@ -123,7 +122,7 @@ function actingUnit(plan) {
 
 /** The unit a plan is aimed at, re-read off the current map. */
 function planTarget(plan) {
-  return unitByTokenUuid((plan.target ?? plan.targetToken)?.tokenUuid ?? '');
+  return unitByTokenUuid(plan.target?.tokenUuid ?? '');
 }
 
 /** Answer a continuation the system offered, ending the turn rather than taking a second swing on the spot. */
@@ -134,11 +133,13 @@ async function answerContinuation(unit, continuation, actions = NO_EXECUTION) {
     exchangeRequestId: continuation.exchangeRequestId ?? '',
     decision: END_TURN_DECISION
   });
-  invalidateBoardMemo();
   return result?.ok === true;
 }
 
-/** Carry out a planned attack, everything the plan assumed re-verified on the map as it now stands. */
+/**
+ * Carry out a planned attack, everything the plan assumed re-verified on the map as it now stands. False when the
+ * attack was aborted or the exchange refused.
+ */
 export async function attack(plan, actions = NO_EXECUTION) {
   const unit = actingUnit(plan);
   const target = planTarget(plan);
@@ -147,7 +148,10 @@ export async function attack(plan, actions = NO_EXECUTION) {
     return false;
   }
   if (!verifyAttack(unit, target, plan)) return false;
-  await equip(unit, plan.weapon, actions);
+  if (!await equip(unit, plan.weapon, actions)) {
+    console.warn(`${LOG} ${unit.name} could not wield ${plan.weapon.name}, so the attack was aborted.`);
+    return false;
+  }
   actions.checkpoint();
   await faceTargets(unit.tokenUuid, target.tokenUuid);
   if (!await openPlan(unit, actions)) return false;
@@ -160,7 +164,6 @@ export async function attack(plan, actions = NO_EXECUTION) {
     previewFingerprint: '',
     weaponArtUuid: ''
   });
-  invalidateBoardMemo();
   if (result?.ok !== true) {
     console.warn(`${LOG} ${unit.name}'s exchange was refused.`, result?.code ?? '');
     return false;
@@ -175,12 +178,7 @@ function verifyAttack(unit, target, plan) {
     console.warn(`${LOG} ${unit.name} is sharing a square, so its attack was aborted.`);
     return false;
   }
-  const distance = unitDistance(unit, target);
-  const range = plan.weapon.range;
-  if (!range || distance < range.minRange || distance > range.maxRange) {
-    console.warn(`${LOG} ${unit.name} was at range ${distance}, outside ${plan.weapon.name}, so it was aborted.`);
-    return false;
-  }
+  if (!withinRange(unit, target, plan.weapon, 'attack')) return false;
   if (!canActivate(unit, plan.weapon) || !canTarget(unit, plan.weapon, target)) {
     console.warn(`${LOG} ${plan.weapon.name} no longer meets its requirements, so the attack was aborted.`);
     return false;
@@ -189,25 +187,17 @@ function verifyAttack(unit, target, plan) {
 }
 
 /**
- * Use a bonus-action self-heal between moving and acting when the unit is below the item's heal threshold. It costs
- * the turn's action nothing. Returns true when one was used.
+ * Use a bonus-action self-heal, which costs the turn's action nothing, when the unit is below the item's heal
+ * threshold. Returns true when one was used.
  */
 export async function useBonusSelfHeal(unit, { onEngage = null, actions = NO_EXECUTION } = {}) {
   const fresh = unitByTokenUuid(unit.tokenUuid) ?? unit;
-  if (fresh.turn?.bonusActionAvailable !== true) return false;
-  const maxHp = Number(fresh.hpMax) || 0;
-  const hp = Number(fresh.hp) || 0;
-  if (maxHp <= 0 || hp <= 0) return false;
-  const fraction = hp / maxHp;
-  for (const item of bonusSelfHealItemsOf(loadout(fresh).items)) {
-    if (!item.range || fraction >= healThresholdOf(item)) continue;
-    if (!canActivate(fresh, item) || !canTarget(fresh, item, fresh)) continue;
-    if (onEngage) await onEngage();
-    if (!await activate(fresh, item, fresh, actions)) return false;
-    await awaitSettled({ label: `${fresh.name}'s bonus action` });
-    return true;
-  }
-  return false;
+  const item = bonusSelfHealDue(fresh);
+  if (!item) return false;
+  if (onEngage) await onEngage();
+  if (!await activate(fresh, item, fresh, actions)) return false;
+  await awaitSettled({ label: `${fresh.name}'s bonus action` });
+  return true;
 }
 
 /** Perform a planned support action, re-verifying what may have changed while the unit walked. */
@@ -239,11 +229,18 @@ function verifyAbility(unit, target, item) {
     console.warn(`${LOG} ${item.name} no longer meets its requirements, so the ability was aborted.`);
     return false;
   }
-  if (target.tokenUuid === unit.tokenUuid) return true;
+  return target.tokenUuid === unit.tokenUuid || withinRange(unit, target, item, 'ability');
+}
+
+/**
+ * Whether the target stands within the weapon's or item's range of the unit, warning in the console when it does not.
+ * @param {string} kind What is aborted when it does not, 'attack' or 'ability', for the warning.
+ */
+function withinRange(unit, target, item, kind) {
   const distance = unitDistance(unit, target);
   const range = item.range;
   if (!range || distance < range.minRange || distance > range.maxRange) {
-    console.warn(`${LOG} ${unit.name} was at range ${distance}, outside ${item.name}, so the ability was aborted.`);
+    console.warn(`${LOG} ${unit.name} was at range ${distance}, outside ${item.name}, so the ${kind} was aborted.`);
     return false;
   }
   return true;
@@ -260,7 +257,6 @@ async function activate(unit, item, target, actions = NO_EXECUTION) {
     placement: null,
     params: {}
   });
-  invalidateBoardMemo();
   if (result?.ok !== true) {
     console.warn(`${LOG} ${unit.name} could not use ${item.name}.`, result?.code ?? '');
     return false;

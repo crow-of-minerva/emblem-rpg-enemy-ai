@@ -1,4 +1,16 @@
 /** @layer planner */
+/*
+ * Movement plans that need no target: zone crossings (climbs and drops) and whether one is worth its fall risk, taking
+ * off again after a stance break, and the Retreat and Free Roam moves.
+ */
+import { airborneBeyondMelee, crossingsOf, systemMeleeElevationReach } from '../foundry/system-bridge.mjs';
+import { board } from './board.mjs';
+import { cellKey, footprintOccupiedIn, parseCellKey, standingDistance } from './grid.mjs';
+import { usableWeapons } from './loadout.mjs';
+import { unpredictableRoll } from './profile.mjs';
+import { measure, score } from './scoring.mjs';
+import { elevationAt, moveCostAt, occupiedCells, reachableAnchors } from './squares.mjs';
+import { collectTargets, hostileTokens } from './targeting.mjs';
 import {
   CROSSING_TEMPO_PENALTY,
   CROSSING_VALUE_MARGIN,
@@ -6,14 +18,7 @@ import {
   LETHAL_RISK_MIN_CHANCE,
   SCORE_SCALE,
   SEVERE_FALL_FRACTION
-} from '../constants.mjs';
-import { airborneBeyondMelee, crossingsOf } from '../foundry/system-bridge.mjs';
-import { board } from './board.mjs';
-import { elevationAt, moveCostAt, occupiedCells, reachableAnchors } from './geometry.mjs';
-import { collectTargets, hostileTokens, usableWeapons } from './roster.mjs';
-import { measure, score } from './scoring.mjs';
-import { unpredictableRoll } from './profile.mjs';
-import { cellKey, footprintOccupiedIn, parseCellKey, standingDistance } from './vocabulary.mjs';
+} from './tuning.mjs';
 
 /* -------------------------------------------- */
 /*  Crossings                                   */
@@ -23,7 +28,7 @@ export function canAttemptCrossing(planner, unit) {
   if (board(planner).exploration === true) return false;
   if (unit.airborne === true) return false;
   if (unit.mounted === true) return false;
-  if ((Number(unit.stance) || 0) < 1) return false;
+  if (unit.stance < 1) return false;
   return unit.turn?.actionAvailable === true;
 }
 
@@ -45,10 +50,9 @@ function wieldedWeapon(unit) {
 }
 
 /**
- * What the best attack after landing on a square would be worth next turn. The reach checks use the landing square: a
- * melee weapon skips a target the system's airborneBeyondMelee says it cannot reach from the ground, and a target
- * whose elevation differs from the landing square's by more than 1. With a shared `measured` map, each target and
- * distance is measured once, from the first square asked about, and that result is reused for every other square.
+ * What the best attack after landing on a square would be worth next turn, with melee reach judged by the system's
+ * flight and height rules from the landing square. With a shared `measured` map, each target and distance is measured
+ * once, from the first square asked about, and reused for every other square.
  */
 function crossingFutureValue(planner, unit, landingX, landingY, risk = null,
   { targets = null, measured = null } = {}) {
@@ -58,41 +62,72 @@ function crossingFutureValue(planner, unit, landingX, landingY, risk = null,
   if (!range) return 0;
 
   const dims = { width: unit.width, height: unit.height };
-  const movement = Number(unit.movement) || 0;
+  const movement = unit.movement;
   const landingElevation = elevationAt(planner, landingX, landingY, dims);
   const meleeOnly = range.maxRange <= 1 && unit.airborne !== true;
+  const meleeReach = systemMeleeElevationReach();
   const grid = board(planner);
 
   let bestValue = 0;
   for (const target of targets ?? collectTargets(planner, unit)) {
     const distance = standingDistance(landingX, landingY, dims, target);
     if (distance > movement + range.maxRange) continue;
+    // meleeOnly is only true for a unit on the ground, so the attacker is never airborne here.
     if (meleeOnly && airborneBeyondMelee({
-      sourceAirborne: unit.airborne === true,
+      sourceAirborne: false,
       targetAirborne: target.airborne === true,
       targetStanceBroken: target.stanceBroken === true,
       classicFlyers: grid.classicFlyers === true,
       flightForbidden: grid.flightForbidden === true
     })) continue;
     const targetDims = { width: target.width, height: target.height };
-    if (meleeOnly && Math.abs(landingElevation - elevationAt(planner, target.x, target.y, targetDims)) > 1) continue;
+    if (meleeOnly
+      && Math.abs(landingElevation - elevationAt(planner, target.x, target.y, targetDims)) > meleeReach) continue;
 
     // Next turn's attack square is unknown, so the attack is measured at the nearest distance within the weapon's
     // range after a full move.
     const closest = Math.max(1, distance - movement);
     const engageDistance = Math.min(range.maxRange, Math.max(range.minRange, closest));
-    const key = `${target.actorUuid}|${engageDistance}`;
-    let cData = measured?.get(key);
-    if (cData === undefined) {
-      cData = measure(unit, target, weapon, engageDistance, null, { standing: { x: landingX, y: landingY } });
-      measured?.set(key, cData);
+    const key = `${target.tokenUuid}|${engageDistance}`;
+    let matchup = measured?.get(key);
+    if (matchup === undefined) {
+      matchup = measure(unit, target, weapon, engageDistance, null, { standing: { x: landingX, y: landingY } });
+      measured?.set(key, matchup);
     }
-    if (!cData) continue;
-    const scored = score(cData, unit, target, risk);
+    if (!matchup) continue;
+    const scored = score(matchup, unit, target, risk);
     if (!scored.productive) continue;
     if (scored.total > bestValue) bestValue = scored.total;
   }
   return bestValue;
+}
+
+/**
+ * Whether a unit takes on a crossing, and what a failure is expected to cost it. A crossing is refused below the
+ * profile's lowest chance, and a drop whose worst fall would kill the unit or take SEVERE_FALL_FRACTION of its max HP
+ * is refused below LETHAL_RISK_MIN_CHANCE.
+ * @param {object} crossing The system's crossing (`movement.crossings`).
+ * @param {import('./types.mjs').PlannerUnit} unit The unit that would climb or drop.
+ * @param {import('./types.mjs').RiskProfile} risk The weights it plans with.
+ * @returns {{chance: number, odds: number, descending: boolean, expectedFallFraction: number}|null} Null when the
+ *   unit refuses the crossing; `odds` is the chance from 0 to 1, and `expectedFallFraction` the share of its max HP a
+ *   drop is expected to cost, 0 for a climb.
+ */
+export function crossingRisk(crossing, unit, risk) {
+  const chance = Number(crossing.chance) || 0;
+  if (chance <= 0 || chance < risk.minChance) return null;
+
+  const descending = crossing.descending === true;
+  const worstFall = descending ? Number(crossing.worstFallDamage) || 0 : 0;
+  const maxHp = unit.hpMax || 1;
+  const severe = worstFall >= unit.hp || worstFall >= maxHp * SEVERE_FALL_FRACTION;
+  if (descending && severe && chance < LETHAL_RISK_MIN_CHANCE) return null;
+
+  const odds = chance / 100;
+  const expectedFallFraction = descending
+    ? (1 - odds) * (Number(crossing.fallFraction) || 0) * FALL_EXPECTED_MULTIPLIER
+    : 0;
+  return { chance, odds, descending, expectedFallFraction };
 }
 
 /** Every crossing this unit could attempt this turn, keyed by landing so the cheapest approach to each is kept. */
@@ -120,8 +155,13 @@ export function collectCrossings(unit, graph, anchors) {
 
 /**
  * The best zone crossing for this turn, or null when none beats what the turn otherwise offers. Each crossing is
- * charged for its fall risk and for the turn spent climbing. `runActionLoop` in `driver/turn.mjs` asks when the turn
- * has no real action to take.
+ * charged for its fall risk and for the turn spent climbing.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit that would climb or drop.
+ * @param {import('./types.mjs').TurnPlan|null} currentPlan The action it would otherwise take; a crossing must beat
+ *   its attack.
+ * @param {import('./types.mjs').RiskProfile} riskProfile The weights it plans with.
+ * @returns {import('./types.mjs').CrossingPlan|null}
  */
 export function planCrossing(planner, unit, currentPlan, riskProfile) {
   if (!riskProfile) throw new TypeError('planCrossing: a risk profile is required.');
@@ -131,8 +171,6 @@ export function planCrossing(planner, unit, currentPlan, riskProfile) {
   const { graph, anchors } = reachableAnchors(unit);
   const startX = unit.x;
   const startY = unit.y;
-  const maxHp = Number(unit.hpMax) || 1;
-  const currentHp = Number(unit.hp) || 0;
   const currentValue = currentPlan?.kind === 'attack' ? currentPlan.score.total : 0;
 
   const options = collectCrossings(unit, graph, anchors);
@@ -144,35 +182,26 @@ export function planCrossing(planner, unit, currentPlan, riskProfile) {
   let best = null;
   for (const option of options) {
     const { crossing, anchorX, anchorY, landingX, landingY, moveCost } = option;
-    const chance = Number(crossing.chance) || 0;
-    if (chance <= 0 || chance < risk.minChance) continue;
-
-    const descending = crossing.descending === true;
-    const worstFall = descending ? Number(crossing.worstFallDamage) || 0 : 0;
-    const severe = worstFall >= currentHp || worstFall >= maxHp * SEVERE_FALL_FRACTION;
-    if (descending && severe && chance < LETHAL_RISK_MIN_CHANCE) continue;
+    const accepted = crossingRisk(crossing, unit, risk);
+    if (!accepted) continue;
 
     const futureValue = future(landingX, landingY);
     if (futureValue <= 0) continue;
 
-    const fallFraction = descending
-      ? (1 - (chance / 100)) * (Number(crossing.fallFraction) || 0) * FALL_EXPECTED_MULTIPLIER
-      : 0;
-    const value = ((chance / 100) * futureValue * risk.futureDiscount)
-      - (SCORE_SCALE * fallFraction * risk.fallAversion)
+    const value = (accepted.odds * futureValue * risk.futureDiscount)
+      - (SCORE_SCALE * accepted.expectedFallFraction * risk.fallAversion)
       - CROSSING_TEMPO_PENALTY;
 
     if (value <= baseline + CROSSING_VALUE_MARGIN) continue;
     if (best && !(value > best.value || (value === best.value && moveCost < best.moveCost))) continue;
     best = {
       kind: 'crossing',
-      unit,
       skill: crossing.skillKey,
-      chance,
+      chance: accepted.chance,
       futureValue,
       value,
       moveCost,
-      crossing: { ...crossing, destX: landingX, destY: landingY },
+      crossing,
       origin: { x: anchorX, y: anchorY },
       needsMove: anchorX !== startX || anchorY !== startY,
       graph
@@ -184,7 +213,17 @@ export function planCrossing(planner, unit, currentPlan, riskProfile) {
 /* -------------------------------------------- */
 /*  Simple movement                             */
 /* -------------------------------------------- */
-/** Every square this unit could stand on, with its cost and its distance to the nearest hostile. */
+/** The distance in squares from a footprint on a square to the nearest of the hostiles, or Infinity with none. */
+function nearestHostileDistance(x, y, dims, hostiles) {
+  let nearest = Infinity;
+  for (const hostile of hostiles) nearest = Math.min(nearest, standingDistance(x, y, dims, hostile));
+  return nearest;
+}
+
+/**
+ * Every square this unit could move to and stop on, leaving out the one it stands on, with its cost and its distance
+ * to the nearest hostile. `standing` is that distance from the square the unit stands on now.
+ */
 export function movementOptions(planner, unit, { budget = null, hostiles = null } = {}) {
   const { graph, anchors } = reachableAnchors(unit);
   const landable = new Set((graph.destinations ?? []).map(cell => cellKey(cell.x, cell.y)));
@@ -203,21 +242,26 @@ export function movementOptions(planner, unit, { budget = null, hostiles = null 
     if (budget !== null && moveCost > budget) continue;
     if (anchorX === startX && anchorY === startY) continue;
     if (footprintOccupiedIn(occupied, dims, anchorX, anchorY)) continue;
-
-    let nearestHostile = Infinity;
-    for (const hostile of threats) {
-      const distance = standingDistance(anchorX, anchorY, dims, hostile);
-      if (distance < nearestHostile) nearestHostile = distance;
-    }
+    const nearestHostile = nearestHostileDistance(anchorX, anchorY, dims, threats);
     options.push({ anchorX, anchorY, moveCost, nearestHostile });
   }
-  return { options, graph, hostileCount: threats.length };
+  const standing = nearestHostileDistance(startX, startY, dims, threats);
+  return { options, graph, hostileCount: threats.length, standing };
 }
 
-/** Back away: furthest from the nearest threat, ties going to the cheapest square. */
+/**
+ * Back away: the square furthest from the nearest hostile, ties going to the cheapest. The unit stays where it is
+ * when no square it can reach is further from the nearest hostile than its own, as in a dead end.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The unit retreating.
+ * @param {object} [options]
+ * @param {number|null} [options.budget] How far the unit's condition lets it walk; null for all it has.
+ * @returns {import('./types.mjs').WalkPlan|null} Null when no hostile is on the map or no reachable square is
+ *   further from one.
+ */
 export function planRetreat(planner, unit, { budget = null } = {}) {
-  const { options, graph, hostileCount } = movementOptions(planner, unit, { budget });
-  if (hostileCount === 0 || options.length === 0) return null;
+  const { options, graph, hostileCount, standing } = movementOptions(planner, unit, { budget });
+  if (hostileCount === 0) return null;
 
   let best = null;
   for (const option of options) {
@@ -227,19 +271,19 @@ export function planRetreat(planner, unit, { budget = null } = {}) {
       best = option;
     }
   }
-  if (!best) return null;
-  return { destination: { x: best.anchorX, y: best.anchorY }, graph, safety: best.nearestHostile };
+  if (!best || best.nearestHostile <= standing) return null;
+  return { destination: { x: best.anchorX, y: best.anchorY }, graph };
 }
 
 /**
  * Wander: a uniformly random reachable square, deliberately unweighted, since any bias would read as intent. The draw
  * is `unpredictableRoll`, fixed for the round and the unit, so a turn replayed after a rollback wanders to the same
  * square.
- * @param {object} planner The Scene's planner.
- * @param {object} unit The wandering unit.
+ * @param {import('./scene.mjs').ScenePlanner} planner The Scene's planner.
+ * @param {import('./types.mjs').PlannerUnit} unit The wandering unit.
  * @param {object} [options]
- * @param {number|null} [options.budget] How far the authored directive lets it walk.
- * @returns {object|null} The square to wander to, or null when it has nowhere to go.
+ * @param {number|null} [options.budget] How far the unit's condition lets it walk.
+ * @returns {import('./types.mjs').WalkPlan|null} The square to wander to, or null when it has nowhere to go.
  */
 export function planFreeRoam(planner, unit, { budget = null } = {}) {
   const { options, graph } = movementOptions(planner, unit, { budget });

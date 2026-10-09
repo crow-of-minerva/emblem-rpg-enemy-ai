@@ -1,3 +1,6 @@
+/* The combat tracker's Enemy AI switch and behaviour badges, and the AI Parameters editor. The Combat AI tab and
+   Set Combat AI on Selected are styled in combat-ai-editors.css. */
+
 /* -------------------------------------------- */
 /*  Combat tracker: the Enemy AI switch         */
 /* -------------------------------------------- */
@@ -11,7 +14,7 @@
 }
 
 /* The switch is one of the system's own .ect-btn-toggle .ect-btn-wide buttons, so its metrics, casing and quiet
-   colour all come from play-surfaces.css. Only the armed colours and the orbit belong to this module. */
+   colour all come from the system stylesheet. Only the armed colours and the orbit belong to this module. */
 .ect-toggles .ect-btn-ai.is-on,
 .ect-toggles .ect-btn-ai.is-locked {
   position: relative;
@@ -65,16 +68,6 @@
 .ect-unit-icon.ect-behavior-freeRoam {
   color: #ffd24a;
   filter: drop-shadow(0 0 3px rgba(255, 210, 74, 0.6));
-}
-
-/* -------------------------------------------- */
-/*  Combat AI tab                               */
-/* -------------------------------------------- */
-
-/* Every other rule the tab needs already ships in the system's tools.css. The gate note is the one addition:
-   it stays in the DOM so the Faction tab's Actor Type select can show and hide it live. */
-.acp-ai-pane .acp-empty-note[hidden] {
-  display: none;
 }
 
 /* -------------------------------------------- */
@@ -155,76 +148,3 @@
   border-bottom: 1px solid var(--color-border-light-2);
   padding-bottom: 3px;
 }
-
-/* -------------------------------------------- */
-/*  Set Combat AI on Selected                   */
-/* -------------------------------------------- */
-
-.application.dialog.emblem-ai-overwrite .window-content { overflow-y: auto !important; }
-
-/* The dialog borrows the Combat AI tab's own .acp-cond-* markup, but the system declares that palette on
-   .emblem-actor-control-panel and scopes .ed-container to .dialog-editor, so both are carried here instead. The row
-   labels are left to the system's unscoped `.acp-field .ed-label`. */
-.emblem-aiset {
-  --acp-card: #221d31;
-  --acp-ctrl: #282237;
-  --acp-field: #0f0d16;
-  --acp-tx: #ded9e2;
-  --acp-mu: #837c92;
-  --acp-gold: #d8b36a;
-  --acp-gold-bright: #eccf90;
-  --acp-danger: #b5766c;
-  --acp-hair: rgba(255, 255, 255, 0.06);
-  --acp-card-fx: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-}
-.emblem-aiset.ed-container {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 4px 2px;
-}
-.emblem-aiset .ed-select,
-.emblem-aiset .ed-input {
-  width: 100%;
-  box-sizing: border-box;
-  height: 28px;
-  padding: 0 5px;
-  border: 0 solid;
-  font-size: 12px;
-}
-.emblem-aiset .ed-input--compact { font-size: 11px; }
-.emblem-aiset .acp-btn {
-  background: transparent;
-  border: 1px solid var(--color-border-light-2);
-  color: inherit;
-  font-size: 11px;
-  padding: 2px 10px;
-  line-height: 1.2;
-  border-radius: 3px;
-  height: auto;
-  min-height: 0;
-}
-.emblem-aiset .acp-btn:hover:not(:disabled) {
-  background: var(--color-cool-5);
-  border-color: var(--color-border-light-2);
-}
-.emblem-aiset .acp-btn-icon { width: 28px; height: 24px; padding: 0; background: transparent; border: none; }
-.emblem-aiset .acp-cond-delete { color: var(--emblem-delete, #a84343); }
-.emblem-aiset .acp-cond-delete:hover { color: var(--emblem-delete-hover, #e04b4b); }
-.emblem-aiset .acp-cond-title { font-size: 10px; }
-.emblem-aiset .acp-cond-note { font-size: 9px; }
-.emblem-aiset .ed-checkbox { width: 16px; height: 16px; min-height: 0; padding: 0; flex: 0 0 auto; }
-.emblem-aiset .aiset-block { display: flex; flex-direction: column; gap: 8px; }
-.emblem-aiset .aiset-block.is-off { opacity: 0.4; filter: saturate(0.25); pointer-events: none; }
-.emblem-aiset .aiset-scope {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 0;
-  color: var(--acp-tx);
-  cursor: var(--cursor-pointer);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
-}
-.emblem-aiset .aiset-rule { border: none; border-top: 1px solid var(--color-cool-4); margin: 2px 0; }
